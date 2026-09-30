@@ -2,7 +2,8 @@ name: Avisos
 
 on:
   schedule:
-    - cron: '*/10 * * * *'
+    # every 10 minutes, off the round minutes (GitHub's busiest, where scheduled runs get delayed or dropped)
+    - cron: '4-59/10 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
