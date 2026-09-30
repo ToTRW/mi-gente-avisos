@@ -5,7 +5,8 @@ Las notificaciones de [Mi Gente](https://mi-gente-quedadas.web.app): cada 10 min
 Push a los dispositivos donde cada persona los ha activado.
 
 - Qué se avisa: plan nuevo, hora fijada, plan aplazado o con fechas cambiadas, recordatorio de respuesta, chat,
-  toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza y caja sin abrir.
+  toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza, caja sin abrir, racha en peligro
+  (a partir de las 20:00) y eventos (cuando empiezan y su último día).
 - Nada entre las 23:00 y las 9:00 (hora de Madrid): se guardan para la mañana, y si son muchos llegan en uno.
 - Lo ya avisado se guarda en `config/push-state`, así que no se repite nada.
 - Las claves: `VAPID_PUBLIC` y `VAPID_PRIVATE` son secretos del repositorio. La pública también está en la app.

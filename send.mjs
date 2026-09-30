@@ -10,6 +10,7 @@
 // DRY_RUN=1       print what would be sent, send and save nothing
 // FIRESTORE_BASE  another documents URL (the local emulator), for testing
 // IGNORE_QUIET=1  send even in quiet hours (testing)
+// FAKE_NOW=<ms>   pretend it's then (testing)
 // TEST_TO=<name>  also send that person a test notification right now, quiet hours or not
 import webpush from 'web-push';
 
@@ -17,7 +18,7 @@ const PROJECT = process.env.PROJECT || 'mi-gente-quedadas';
 const DRY = process.env.DRY_RUN === '1';
 const BASE = process.env.FIRESTORE_BASE || `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
 const APP = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' }[PROJECT] || 'https://mi-gente-quedadas.web.app';
-const NOW = Date.now();
+const NOW = Number(process.env.FAKE_NOW) || Date.now();
 const MIN = 60_000, HOUR = 3_600_000;
 
 // ---------- Firestore over REST (the app's rules let it read and write config without signing in) ----------
@@ -84,6 +85,7 @@ async function patch(id, data, paths) {
 
 // ---------- Madrid time ----------
 
+const madridDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
 const madridHour = t => Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' }).format(t));
 const QUIET = process.env.IGNORE_QUIET !== '1' && (h => h >= 23 || h < 9)(madridHour(NOW));
 
@@ -185,6 +187,24 @@ async function main() {
       const to = goatById[gift.toGoatId], from = goatById[gift.fromGoatId];
       if (!to || !plays(to.owner)) continue;
       once(`gift:${gift._doc}:${gift.offeredAt}`, () => say(to.owner, `🎁 ${from?.owner || 'Alguien'} te ha mandado un regalo`, `Para ${to.name}: ábrelo en su parcela`, `/?cabrita=${encodeURIComponent(gift.toGoatId)}`, `gift-${gift.toGoatId}`));
+    }
+  }
+
+  // a farm event: when it starts, and on its last day (everyone who plays)
+  const ev = byId['farm-event'];
+  if (prefs.farmEnabled && ev?.id && ev.from <= NOW && NOW < ev.to) {
+    const name = ev.name || 'Evento en la granja', players = friends.filter(p => prefs.farmOpen === true || admins.includes(p));
+    once(`event:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `🎉 Empieza: ${name}`, ev.blurb || 'Pásate por la granja.', '/?granja', 'event')));
+    if (ev.to - NOW < 24 * HOUR) once(`event-last:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `⏳ Último día: ${name}`, ev.blurb || 'Mañana se acaba.', '/?granja', 'event')));
+  }
+
+  // a streak at stake: from 20:00, a run of three days or more that today's care hasn't counted yet
+  if (prefs.farmEnabled && madridHour(NOW) >= 20) {
+    const today = madridDay(NOW), yesterday = madridDay(NOW - 24 * HOUR);
+    for (const goat of config.filter(d => d._doc.startsWith('goat-'))) {
+      const s = goat.streak;
+      if (!s || s.count < 3 || s.day !== yesterday) continue;
+      once(`streak:${goat._doc}:${today}`, () => say(goat.owner, `☀️ Racha de ${s.count} días`, `Cuida hoy a ${goat.name} para no perderla`, `/?cabrita=${encodeURIComponent(goat._doc.slice(5))}`, 'streak'));
     }
   }
 
