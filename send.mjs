@@ -106,8 +106,7 @@ async function main() {
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
   const prefs = byId.preferences || {};
-  const subs = byId['push-subs'] || {};
-  delete subs._doc;
+  const { _doc, ...subs } = byId['push-subs'] || {};
   let state = {};
   try { state = JSON.parse(byId['push-state']?.json || '{}'); } catch { state = {}; }
   const first = typeof state.logs !== 'string';
