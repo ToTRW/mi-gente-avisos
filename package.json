@@ -1,0 +1,9 @@
+{
+  "name": "mi-gente-avisos",
+  "private": true,
+  "type": "module",
+  "description": "Web Push notifications for Mi Gente, sent on a schedule by GitHub Actions.",
+  "scripts": { "send": "node send.mjs", "dry": "DRY_RUN=1 node send.mjs" },
+  "engines": { "node": ">=20" },
+  "dependencies": { "web-push": "^3.6.7" }
+}

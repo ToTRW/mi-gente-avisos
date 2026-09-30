@@ -1,0 +1,40 @@
+name: Avisos
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Solo mostrar lo que se enviaría (1) o enviar de verdad (0)'
+        default: '0'
+      test_to:
+        description: 'Mandar ahora un aviso de prueba a esta persona (por ejemplo Alex)'
+        default: ''
+
+jobs:
+  send:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [mi-gente-quedadas, mi-gente-preprod]
+    # one run at a time per project, so two never write the sent-list over each other
+    concurrency:
+      group: avisos-${{ matrix.project }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node send.mjs
+        env:
+          PROJECT: ${{ matrix.project }}
+          VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
+          VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
+          DRY_RUN: ${{ inputs.dry_run || '0' }}
+          TEST_TO: ${{ inputs.test_to || '' }}

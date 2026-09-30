@@ -1,0 +1,240 @@
+// Mi Gente's notifications. Run every few minutes by GitHub Actions: it reads the app's Firestore (the plans' activity
+// log, the chat, missed pokes and the goat farm), works out who should hear about what, and sends Web Push
+// notifications to the devices people switched them on for (config/push-subs). What it has already said lives in
+// config/push-state, so nothing is sent twice. Nothing between 23:00 and 9:00 in Madrid: those wait for the morning,
+// and many at once become one.
+//
+// PROJECT         Firebase project (mi-gente-quedadas or mi-gente-preprod)
+// VAPID_PUBLIC    the public key (also in the app, src/data/push.ts)
+// VAPID_PRIVATE   the private key (a repository secret)
+// DRY_RUN=1       print what would be sent, send and save nothing
+// FIRESTORE_BASE  another documents URL (the local emulator), for testing
+// IGNORE_QUIET=1  send even in quiet hours (testing)
+// TEST_TO=<name>  also send that person a test notification right now, quiet hours or not
+import webpush from 'web-push';
+
+const PROJECT = process.env.PROJECT || 'mi-gente-quedadas';
+const DRY = process.env.DRY_RUN === '1';
+const BASE = process.env.FIRESTORE_BASE || `https://firestore.googleapis.com/v1/projects/${PROJECT}/databases/(default)/documents`;
+const APP = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' }[PROJECT] || 'https://mi-gente-quedadas.web.app';
+const NOW = Date.now();
+const MIN = 60_000, HOUR = 3_600_000;
+
+// ---------- Firestore over REST (the app's rules let it read and write config without signing in) ----------
+
+const value = v => v == null ? undefined
+  : 'stringValue' in v ? v.stringValue
+  : 'integerValue' in v ? Number(v.integerValue)
+  : 'doubleValue' in v ? v.doubleValue
+  : 'booleanValue' in v ? v.booleanValue
+  : 'nullValue' in v ? null
+  : 'timestampValue' in v ? Date.parse(v.timestampValue)
+  : 'mapValue' in v ? fields(v.mapValue.fields)
+  : 'arrayValue' in v ? (v.arrayValue.values || []).map(value)
+  : undefined;
+const fields = f => Object.fromEntries(Object.entries(f || {}).map(([k, v]) => [k, value(v)]));
+// the document's own id is `_doc` (a goat has an `id` field of its own)
+const docOf = d => ({ ...fields(d.fields), _doc: d.name.split('/').pop() });
+
+async function get(path) {
+  const r = await fetch(`${BASE}/${path}`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`);
+  return docOf(await r.json());
+}
+
+async function list(collection) {
+  const out = [];
+  let token = '';
+  do {
+    const r = await fetch(`${BASE}/${collection}?pageSize=300${token ? `&pageToken=${token}` : ''}`);
+    if (!r.ok) throw new Error(`list ${collection}: ${r.status}`);
+    const j = await r.json();
+    out.push(...(j.documents || []).map(docOf));
+    token = j.nextPageToken || '';
+  } while (token);
+  return out;
+}
+
+/**
+ * Documents of a collection whose `field` (a timestamp) is after `cursor`, oldest first. The cursor is Firestore's
+ * own timestamp string: it keeps microseconds, which a JS number would round away (and the last one would come back
+ * every run). Each document carries its own as `_at`.
+ */
+async function since(collection, field, cursor) {
+  const r = await fetch(`${BASE}:runQuery`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ structuredQuery: {
+    from: [{ collectionId: collection }],
+    where: { fieldFilter: { field: { fieldPath: field }, op: 'GREATER_THAN', value: { timestampValue: cursor } } },
+    orderBy: [{ field: { fieldPath: field }, direction: 'ASCENDING' }], limit: 300 } }) });
+  if (!r.ok) throw new Error(`query ${collection}: ${r.status} ${await r.text()}`);
+  return (await r.json()).filter(x => x.document).map(x => ({ ...docOf(x.document), _at: x.document.fields?.[field]?.timestampValue }));
+}
+
+const quote = s => /^[A-Za-z_][A-Za-z_0-9]*$/.test(s) ? s : '`' + s.replace(/[`\\]/g, m => '\\' + m) + '`';
+
+/** Writes the named fields of config/<id> (a field left out of `data` is deleted). */
+async function patch(id, data, paths) {
+  if (DRY) return;
+  const encode = v => typeof v === 'string' ? { stringValue: v } : typeof v === 'number' ? { doubleValue: v } : { nullValue: null };
+  const body = { fields: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, encode(v)])) };
+  const mask = paths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p.map(quote).join('.'))}`).join('&');
+  const r = await fetch(`${BASE}/config/${id}?${mask}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(`patch ${id}: ${r.status} ${await r.text()}`);
+}
+
+// ---------- Madrid time ----------
+
+const madridHour = t => Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' }).format(t));
+const QUIET = process.env.IGNORE_QUIET !== '1' && (h => h >= 23 || h < 9)(madridHour(NOW));
+
+// ---------- The goat farm (mirrors src/lib/goats/model.ts in the app) ----------
+
+const clamp = n => Math.max(0, Math.min(100, n));
+const foodDecay = goat => goat.personality === 'comilona' ? 4 : 3;
+function needsNow(goat) {
+  const hours = Math.max(0, NOW - (goat.restedAt || NOW)) / HOUR;
+  const n = goat.needs || {};
+  return { food: Math.max(20, clamp((n.food ?? 75) - foodDecay(goat) * hours)), mood: Math.max(20, clamp((n.mood ?? 75) - 2 * hours)) };
+}
+const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
+
+// ---------- Work out what to say ----------
+
+async function main() {
+  const [config, presence] = await Promise.all([list('config'), list('presence')]);
+  const byId = Object.fromEntries(config.map(d => [d._doc, d]));
+  const friends = byId.users?.list || [];
+  const admins = byId.roles?.admins || ['Alex'];
+  const prefs = byId.preferences || {};
+  const subs = byId['push-subs'] || {};
+  delete subs._doc;
+  let state = {};
+  try { state = JSON.parse(byId['push-state']?.json || '{}'); } catch { state = {}; }
+  const first = typeof state.logs !== 'string';
+  if (first) state.logs = state.chat = new Date(NOW).toISOString(); state.sent ??= {}; state.low ??= {}; state.boxSeen ??= {}; state.missed ??= {}; state.queue ??= {};
+
+  /** { to, title, body, url, tag } */
+  const out = [];
+  const say = (to, title, body, url = '/', tag) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag }); };
+  const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
+
+  // plans: from the activity log
+  const logs = await since('activityLogs', 'at', state.logs);
+  const events = {};
+  const eventOf = async id => id ? (events[id] ??= await get(`events/${id}`).catch(() => null)) : null;
+  for (const log of logs) {
+    if (log._at) state.logs = log._at;
+    const ev = await eventOf(log.eventId);
+    const who = log.actor || 'Alguien', name = log.eventName || ev?.name || 'un plan';
+    const people = (ev?.participants ?? friends).filter(p => p !== who);
+    const url = log.eventId ? `/?evento=${encodeURIComponent(log.eventId)}` : '/';
+    if (log.action === 'event:create') people.forEach(p => say(p, `📅 ${who} ha creado un plan`, name, url, `plan-${log.eventId}`));
+    if (log.action === 'event:lock') people.forEach(p => say(p, `🔒 Hora fijada`, `${name}${log.range ? ` · ${log.range}` : ''}`, url, `plan-${log.eventId}`));
+    if (log.action === 'event:postpone') people.forEach(p => say(p, `⏩ ${who} ha aplazado un plan`, `${name}: vuelve a marcar tus horas`, url, `plan-${log.eventId}`));
+    if (log.action === 'event:edit' && log.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${log.eventId}`));
+    if (log.action === 'event:nudge') (log.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${log.eventId}`));
+    if (log.action === 'event:nudge-maybe') (log.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${log.eventId}`));
+  }
+
+  // the chat: one notification per person for however many messages came in
+  const messages = await since('messages', 'ts', state.chat);
+  if (messages.length) {
+    state.chat = messages[messages.length - 1]._at || state.chat;
+    for (const person of friends) {
+      const theirs = messages.filter(m => m.name !== person);
+      if (!theirs.length) continue;
+      const last = theirs[theirs.length - 1];
+      say(person, theirs.length === 1 ? `💬 ${last.name}` : `💬 ${theirs.length} mensajes en el chat`,
+        theirs.length === 1 ? last.text : `${last.name}: ${last.text}`, '/?grupo', 'chat');
+    }
+  }
+
+  // pokes that arrived while they were away (presence/<name>.missed = { from: count })
+  for (const p of presence) {
+    const missed = p.missed || {}, seen = state.missed[p._doc] || {};
+    for (const [from, n] of Object.entries(missed)) if (n > (seen[from] || 0)) say(p._doc, `👉 ${from} te ha dado un toque`, 'Entra a ver qué quiere', '/', `poke-${from}`);
+    state.missed[p._doc] = missed;
+  }
+
+  // the farm, for whoever can play it
+  if (prefs.farmEnabled) {
+    const plays = person => prefs.farmOpen === true || admins.includes(person);
+    const goats = config.filter(d => d._doc.startsWith('goat-'));
+    const goatById = Object.fromEntries(goats.map(g => [g._doc.slice(5), g]));
+    for (const goat of goats) {
+      const owner = goat.owner, gid = goat._doc.slice(5);
+      if (!plays(owner)) continue;
+      const url = `/?cabrita=${encodeURIComponent(gid)}`;
+      // back from a trip, with things to pick up
+      const trip = goat.soloTrip;
+      if (trip && !trip.collected && trip.startedAt + trip.durationMs <= NOW)
+        once(`trip:${trip.id}`, () => say(owner, `🧭 ${goat.name} ha vuelto de la excursión`, 'Trae cosas para recoger', url, `trip-${gid}`));
+      // hungry or sad: once each time it drops, again only after it's been looked after
+      const n = needsNow(goat), low = state.low[gid] ||= {};
+      for (const [need, title] of [['food', `🌾 ${goat.name} tiene hambre`], ['mood', `💔 ${goat.name} está triste`]]) {
+        if (n[need] <= LOW && !low[need]) { low[need] = true; say(owner, title, need === 'food' ? 'Pásate a darle de comer' : 'Pásate a hacerle caso', url, `need-${gid}`); }
+        if (n[need] >= BACK) low[need] = false;
+      }
+      // a box waiting for an hour
+      if ((goat.boxes || []).length) {
+        const seen = state.boxSeen[gid] ||= NOW;
+        if (NOW - seen >= HOUR) once(`box:${gid}:${seen}`, () => say(owner, `📦 ${goat.name} tiene una caja sin abrir`, '¿Qué habrá dentro?', url, `box-${gid}`));
+      } else delete state.boxSeen[gid];
+    }
+    // gifts waiting to be accepted
+    for (const gift of config.filter(d => d._doc.startsWith('farm-costume-gift-') && d.status === 'pending')) {
+      const to = goatById[gift.toGoatId], from = goatById[gift.fromGoatId];
+      if (!to || !plays(to.owner)) continue;
+      once(`gift:${gift._doc}:${gift.offeredAt}`, () => say(to.owner, `🎁 ${from?.owner || 'Alguien'} te ha mandado un regalo`, `Para ${to.name}: ábrelo en su parcela`, `/?cabrita=${encodeURIComponent(gift.toGoatId)}`, `gift-${gift.toGoatId}`));
+    }
+  }
+
+  // forget what's long gone
+  for (const [k, t] of Object.entries(state.sent)) if (NOW - t > 14 * 24 * HOUR) delete state.sent[k];
+
+  // the first run only sets the starting point: no history gets sent
+  if (first) out.length = 0;
+
+  // quiet hours: keep them for the morning
+  for (const o of out) (state.queue[o.to] ||= []).push(o);
+  for (const k of Object.keys(state.queue)) state.queue[k] = state.queue[k].slice(-30);
+  const sends = [];
+  if (!QUIET) {
+    for (const [person, items] of Object.entries(state.queue)) {
+      if (!items.length) continue;
+      // several for one person become one
+      const batch = items.length > 3
+        ? [{ to: person, title: `Mi Gente: ${items.length} novedades`, body: items.slice(-3).map(i => i.title.replace(/^\S+\s/, '')).join(' · '), url: '/', tag: 'digest' }]
+        : items;
+      sends.push(...batch);
+      state.queue[person] = [];
+    }
+  }
+
+  if (process.env.TEST_TO) sends.push({ to: process.env.TEST_TO, title: '🐐 Prueba de avisos', body: 'Si ves esto, los avisos de Mi Gente llegan a este dispositivo.', url: '/', tag: 'test' });
+
+  // send
+  webpush.setVapidDetails(APP, process.env.VAPID_PUBLIC || '', process.env.VAPID_PRIVATE || '');
+  const gone = [];
+  let delivered = 0;
+  for (const s of sends) {
+    const devices = Object.entries(subs[s.to] || {});
+    for (const [id, sub] of devices) {
+      if (DRY) { console.log(`[dry] ${s.to} (${id}): ${s.title} | ${s.body}`); continue; }
+      try {
+        await webpush.sendNotification({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify({ title: s.title, body: s.body, url: s.url, tag: s.tag }), { TTL: 6 * 3600, urgency: 'normal' });
+        delivered++;
+      } catch (e) {
+        if (e.statusCode === 404 || e.statusCode === 410) gone.push([s.to, id]);
+        else console.error(`push to ${s.to} (${id}) failed: ${e.statusCode || ''} ${e.body || e.message}`);
+      }
+    }
+    if (!devices.length) console.log(`(no devices) ${s.to}: ${s.title}`);
+  }
+  if (gone.length) await patch('push-subs', {}, gone.map(([p, id]) => [p, id]));
+
+  await patch('push-state', { json: JSON.stringify(state) }, [['json']]);
+  console.log(`${PROJECT}: ${logs.length} log entries, ${messages.length} messages; ${out.length} new, ${sends.length} to send${QUIET ? ' (quiet hours: queued)' : ''}, ${delivered} delivered, ${gone.length} dead subscriptions removed${first ? ' (first run: starting point set)' : ''}`);
+}
+
+main().catch(e => { console.error(e); process.exit(1); });
