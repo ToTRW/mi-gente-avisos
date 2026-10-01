@@ -2,8 +2,18 @@
   "name": "mi-gente-avisos",
   "private": true,
   "type": "module",
-  "description": "Web Push notifications for Mi Gente, sent on a schedule by GitHub Actions.",
-  "scripts": { "send": "node send.mjs", "dry": "DRY_RUN=1 node send.mjs" },
-  "engines": { "node": ">=20" },
-  "dependencies": { "web-push": "^3.6.7" }
+  "description": "Web Push notifications for Mi Gente: a Cloudflare Worker on a cron (the same code runs from the command line).",
+  "scripts": {
+    "send": "node send.mjs",
+    "dry": "DRY_RUN=1 node send.mjs",
+    "test": "node --test test/webpush.test.mjs",
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "web-push": "^3.6.7"
+  }
 }
