@@ -1,37 +1,23 @@
 name: Avisos
 
+# The notifications are sent by the Cloudflare Worker (worker.mjs, every 5 minutes). This workflow is only for trying
+# things by hand: a test notification to someone (test_to) or a dry run.
 on:
-  schedule:
-    # every 10 minutes, off the round minutes (GitHub's busiest, where scheduled runs get delayed or dropped)
-    - cron: '4-59/10 * * * *'
   workflow_dispatch:
     inputs:
-      dry_run:
-        description: 'Solo mostrar lo que se enviaría (1) o enviar de verdad (0)'
-        default: '0'
       test_to:
-        description: 'Mandar ahora un aviso de prueba a esta persona (por ejemplo Alex)'
+        description: 'Mandar ahora un aviso de prueba a esta persona (por ejemplo Alex). Vacío: una ronda en seco que solo muestra lo que se enviaría'
         default: ''
-      loop_minutes:
-        description: 'Quedarse mandando cada 10 minutos durante estos minutos (0 = una vez; 170 = como las programadas)'
-        default: '0'
-      chain:
-        description: 'Al terminar, lanzar la siguiente (1) para que el envío no pare nunca'
-        default: '0'
 
 jobs:
   send:
     runs-on: ubuntu-latest
-    # a scheduled run stays up for ~3 h and sends every 10 minutes: GitHub fires schedules late and irregularly (the
-    # first one came 5 h after the repo was made), so one that does arrive covers the gaps. A run started by hand
-    # sends once.
-    timeout-minutes: 185
+    timeout-minutes: 5
     strategy:
       fail-fast: false
       matrix:
         project: [mi-gente-quedadas, mi-gente-preprod]
-    # one run at a time per project, so two never write the sent-list over each other (a scheduled run that arrives
-    # while one is looping waits its turn, and starts when that one ends)
+    # one run at a time per project, so two never write the sent-list over each other
     concurrency:
       group: avisos-${{ matrix.project }}
       cancel-in-progress: false
@@ -42,31 +28,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: |
-          end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
-          while :; do
-            node send.mjs || echo "this round failed; the next one tries again"
-            [ "$(date +%s)" -ge "$end" ] && break
-            sleep 600
-          done
+      - run: node send.mjs
         env:
-          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '170' || inputs.loop_minutes || '0' }}
           PROJECT: ${{ matrix.project }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
-          DRY_RUN: ${{ inputs.dry_run || '0' }}
-          TEST_TO: ${{ inputs.test_to || '' }}
+          # a name: only a test notification to that person; no name: a dry round (the Worker does the real ones)
+          TEST_TO: ${{ inputs.test_to }}
+          TEST_ONLY: ${{ inputs.test_to != '' && '1' || '0' }}
+          DRY_RUN: ${{ inputs.test_to == '' && '1' || '0' }}
 
-  next:
-    # keeps the sender going: when a looping run ends, it starts the next one. GitHub's own schedule fires far too
-    # rarely to rely on (once in the first 14 hours); it stays as the backup that restarts the chain if it breaks.
-    # Not after a run cancelled while waiting its turn, or two chains would keep cancelling and restarting each other.
-    needs: send
-    if: ${{ always() && needs.send.result != 'cancelled' && needs.send.result != 'skipped' && (github.event_name == 'schedule' || inputs.chain == '1') }}
-    runs-on: ubuntu-latest
-    permissions:
-      actions: write
-    steps:
-      - run: gh workflow run avisos.yml -R "$GITHUB_REPOSITORY" -f loop_minutes=170 -f chain=1
-        env:
-          GH_TOKEN: ${{ github.token }}

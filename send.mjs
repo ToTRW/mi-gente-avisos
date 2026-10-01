@@ -9,6 +9,7 @@
 // IGNORE_QUIET=1  send even in quiet hours (testing)
 // FAKE_NOW=<ms>   pretend it's then (testing)
 // TEST_TO=<name>  also send that person a test notification right now, quiet hours or not
+// TEST_ONLY=1     only that test notification: no round, nothing saved
 import { run } from './core.mjs';
 
 const e = process.env;
@@ -21,4 +22,5 @@ run({
   ignoreQuiet: e.IGNORE_QUIET === '1',
   now: Number(e.FAKE_NOW) || Date.now(),
   testTo: e.TEST_TO || '',
+  testOnly: e.TEST_ONLY === '1',
 }).catch(err => { console.error(err); process.exit(1); });

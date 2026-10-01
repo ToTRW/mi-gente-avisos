@@ -97,14 +97,32 @@ const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be
  *   ignoreQuiet    send even in quiet hours (testing)
  *   now            pretend it's then (testing)
  *   testTo         also send that person a test notification right now, quiet hours or not
+ *   testOnly       only that test notification: no round, nothing saved (so it never races the Worker)
  *   log            where the summary and errors go
  * Resolves to the one-line summary.
  */
-export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vapidPrivate = '', dry = false, firestoreBase = '', ignoreQuiet = false, now = Date.now(), testTo = '', log = console.log }) {
+export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vapidPrivate = '', dry = false, firestoreBase = '', ignoreQuiet = false, now = Date.now(), testTo = '', testOnly = false, log = console.log }) {
+  // without the keys nothing can be sent: stop before the round empties the morning queue for nothing
+  if (!dry && (!vapidPublic || !vapidPrivate)) throw new Error('VAPID keys missing: nothing sent, nothing saved');
   const NOW = now;
   const db = firestore(firestoreBase || `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents`, dry);
   const APP = APPS[project] || APPS['mi-gente-quedadas'];
   const QUIET = !ignoreQuiet && (h => h >= 23 || h < 9)(madridHour(NOW));
+
+  if (testOnly) {
+    const subs = (await db.get('config/push-subs')) || {};
+    const devices = Object.entries(subs[testTo] || {}).filter(([k]) => k !== '_doc');
+    const payload = JSON.stringify({ title: '🐐 Prueba de avisos', body: 'Si ves esto, los avisos de Mi Gente llegan a este dispositivo.', url: '/', tag: 'test' });
+    const results = [];
+    for (const [id, sub] of devices) {
+      if (dry) { results.push(`${id}: dry`); continue; }
+      const r = await sendPush({ endpoint: sub.endpoint, keys: sub.keys }, payload, { subject: APP, publicKey: vapidPublic, privateKey: vapidPrivate });
+      results.push(`${id}: ${r.status}${r.text ? ' ' + r.text : ''}`);
+    }
+    const summary = `${project}: test to ${testTo || '(nobody)'}: ${devices.length ? results.join(', ') : 'no devices'}`;
+    log(summary);
+    return summary;
+  }
 
   const [config, presence] = await Promise.all([db.list('config'), db.list('presence')]);
   const byId = Object.fromEntries(config.map(d => [d._doc, d]));
