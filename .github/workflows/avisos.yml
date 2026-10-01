@@ -12,6 +12,9 @@ on:
       test_to:
         description: 'Mandar ahora un aviso de prueba a esta persona (por ejemplo Alex)'
         default: ''
+      loop_minutes:
+        description: 'Quedarse mandando cada 10 minutos durante estos minutos (0 = una vez; 170 = como las programadas)'
+        default: '0'
 
 jobs:
   send:
@@ -44,7 +47,7 @@ jobs:
             sleep 600
           done
         env:
-          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '170' || '0' }}
+          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '170' || inputs.loop_minutes || '0' }}
           PROJECT: ${{ matrix.project }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
