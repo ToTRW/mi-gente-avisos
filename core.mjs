@@ -8,6 +8,7 @@ import { sendPush } from './webpush.mjs';
 
 const APPS = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' };
 const HOUR = 3_600_000;
+const MAX_PUSHES = 6;
 
 // ---------- Firestore over REST (the app's rules let it read and write config without signing in) ----------
 
@@ -26,19 +27,25 @@ const fields = f => Object.fromEntries(Object.entries(f || {}).map(([k, v]) => [
 const docOf = d => ({ ...fields(d.fields), _doc: d.name.split('/').pop() });
 const quote = s => /^[A-Za-z_][A-Za-z_0-9]*$/.test(s) ? s : '`' + s.replace(/[`\\]/g, m => '\\' + m) + '`';
 
+/** Only these fields come back (the Worker's free plan counts every millisecond spent reading what it doesn't use). */
+const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&') : '';
+// what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
+const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
+  'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt'];
+
 function firestore(base, dry) {
   return {
-    async get(path) {
-      const r = await fetch(`${base}/${path}`);
+    async get(path, mask = []) {
+      const r = await fetch(`${base}/${path}${maskQuery(mask, '?')}`);
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`);
       return docOf(await r.json());
     },
-    async list(collection) {
+    async list(collection, mask = []) {
       const out = [];
       let token = '';
       do {
-        const r = await fetch(`${base}/${collection}?pageSize=300${token ? `&pageToken=${token}` : ''}`);
+        const r = await fetch(`${base}/${collection}?pageSize=300${token ? `&pageToken=${token}` : ''}${maskQuery(mask, '&')}`);
         if (!r.ok) throw new Error(`list ${collection}: ${r.status}`);
         const j = await r.json();
         out.push(...(j.documents || []).map(docOf));
@@ -51,8 +58,9 @@ function firestore(base, dry) {
      * own timestamp string: it keeps microseconds, which a JS number would round away (and the last one would come
      * back every run). Each document carries its own as `_at`.
      */
-    async since(collection, field, cursor) {
+    async since(collection, field, cursor, select = []) {
       const r = await fetch(`${base}:runQuery`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ structuredQuery: {
+        ...(select.length ? { select: { fields: [field, ...select].map(fieldPath => ({ fieldPath })) } } : {}),
         from: [{ collectionId: collection }],
         where: { fieldFilter: { field: { fieldPath: field }, op: 'GREATER_THAN', value: { timestampValue: cursor } } },
         orderBy: [{ field: { fieldPath: field }, direction: 'ASCENDING' }], limit: 300 } }) });
@@ -73,11 +81,16 @@ function firestore(base, dry) {
 
 // ---------- Madrid time ----------
 
-// made once: building a formatter is the slow part, and the Worker's free plan counts every millisecond of CPU
-const DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' });
-const HOUR_OF = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' });
-const madridDay = t => DAY.format(t);
-const madridHour = t => Number(HOUR_OF.format(t));
+// By hand rather than with Intl (time zones were most of the Worker's CPU): Madrid is UTC+1, and UTC+2 from the last
+// Sunday of March to the last Sunday of October, changing at 01:00 UTC both times (the EU rule).
+const lastSunday = (year, month) => { const end = Date.UTC(year, month + 1, 0); return end - new Date(end).getUTCDay() * 86_400_000; };
+export function madridOffset(t) {
+  const year = new Date(t).getUTCFullYear();
+  return t >= lastSunday(year, 2) + 3_600_000 && t < lastSunday(year, 9) + 3_600_000 ? 2 : 1;
+}
+const madrid = t => new Date(t + madridOffset(t) * 3_600_000); // read with the getUTC* methods
+export const madridDay = t => madrid(t).toISOString().slice(0, 10);
+export const madridHour = t => madrid(t).getUTCHours();
 
 // ---------- The goat farm (mirrors src/lib/goats/model.ts in the app) ----------
 
@@ -114,7 +127,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
 
   if (testOnly) {
     const subs = (await db.get('config/push-subs')) || {};
-    const devices = Object.entries(subs[testTo] || {}).filter(([k]) => k !== '_doc');
+    const devices = Object.entries(subs[testTo] || {});
     const payload = JSON.stringify({ title: '🐐 Prueba de avisos', body: 'Si ves esto, los avisos de Mi Gente llegan a este dispositivo.', url: '/', tag: 'test' });
     const results = [];
     for (const [id, sub] of devices) {
@@ -127,12 +140,13 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     return summary;
   }
 
-  const [config, presence] = await Promise.all([db.list('config'), db.list('presence')]);
+  // push-subs on its own: its fields are people's names, which a mask can't list
+  const [config, presence, pushSubs] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs')]);
   const byId = Object.fromEntries(config.map(d => [d._doc, d]));
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
   const prefs = byId.preferences || {};
-  const { _doc, ...subs } = byId['push-subs'] || {};
+  const { _doc, ...subs } = pushSubs || {};
   let state = {};
   try { state = JSON.parse(byId['push-state']?.json || '{}'); } catch { state = {}; }
   const first = typeof state.logs !== 'string';
@@ -144,9 +158,9 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
   // plans: from the activity log
-  const logs = await db.since('activityLogs', 'at', state.logs);
+  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names']);
   const events = {};
-  const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`).catch(() => null)) : null;
+  const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name']).catch(() => null)) : null;
   for (const entry of logs) {
     if (entry._at) state.logs = entry._at;
     const ev = await eventOf(entry.eventId);
@@ -162,7 +176,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
 
   // the chat: one notification per person for however many messages came in
-  const messages = await db.since('messages', 'ts', state.chat);
+  const messages = await db.since('messages', 'ts', state.chat, ['name', 'text']);
   if (messages.length) {
     state.chat = messages[messages.length - 1]._at || state.chat;
     for (const person of friends) {
@@ -243,12 +257,18 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   for (const k of Object.keys(state.queue)) state.queue[k] = state.queue[k].slice(-30);
   const sends = [];
   if (!QUIET) {
+    // a round sends at most MAX_PUSHES (each one is encryption the Worker's CPU limit counts); whoever doesn't fit
+    // keeps their queue for the next round, five minutes later (the first person always fits)
+    let budget = MAX_PUSHES;
     for (const [person, items] of Object.entries(state.queue)) {
       if (!items.length) continue;
       // several for one person become one
       const batch = items.length > 3
         ? [{ to: person, title: `Mi Gente: ${items.length} novedades`, body: items.slice(-3).map(i => i.title.replace(/^\S+\s/, '')).join(' · '), url: '/', tag: 'digest' }]
         : items;
+      const cost = batch.length * Object.keys(subs[person] || {}).length;
+      if (sends.length && cost > budget) continue;
+      budget -= cost;
       sends.push(...batch);
       state.queue[person] = [];
     }

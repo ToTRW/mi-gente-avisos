@@ -45,3 +45,18 @@ test('the VAPID token is a valid ES256 JWT for the push service, signed by the k
   const key = createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: b64u(pub.subarray(1, 33)), y: b64u(pub.subarray(33)) }, format: 'jwk' });
   assert.ok(verify('sha256', Buffer.from(`${head}.${claims}`), { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
 });
+
+test('Madrid time by hand matches the time zone database, every hour across the clock changes', async () => {
+  const { madridDay, madridHour } = await import('../core.mjs');
+  const day = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const hour = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' });
+  for (let t = Date.parse('2026-01-01T00:00:00Z'); t < Date.parse('2031-01-01T00:00:00Z'); t += 3_600_000 + 17 * 60_000) {
+    assert.equal(madridDay(t), day.format(t), new Date(t).toISOString());
+    assert.equal(madridHour(t), Number(hour.format(t)), new Date(t).toISOString());
+  }
+  // right at the changes
+  for (const iso of ['2026-03-29T00:59:59Z', '2026-03-29T01:00:00Z', '2026-10-25T00:59:59Z', '2026-10-25T01:00:00Z', '2027-03-28T01:00:00Z', '2027-10-31T00:30:00Z']) {
+    const t = Date.parse(iso);
+    assert.equal(madridHour(t), Number(hour.format(t)), iso);
+  }
+});
