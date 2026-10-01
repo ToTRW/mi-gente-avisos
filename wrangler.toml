@@ -4,11 +4,14 @@ compatibility_date = "2025-09-01"
 workers_dev = false
 
 [triggers]
-# every 5 minutes: about 25 Firestore reads a round per project, well inside the free 50,000 a day
-crons = ["*/5 * * * *"]
+# every 5 minutes for each project (production on :00, :05..., preprod two minutes later; a range with a step,
+# 2-59/5, was accepted on deploy but never fired), one project per run so each
+# stays inside the free plan's 10 ms of CPU; about 25 Firestore reads a round, well inside the free 50,000 a day
+crons = ["*/5 * * * *", "2,7,12,17,22,27,32,37,42,47,52,57 * * * *"]
 
 [vars]
 PROJECTS = "mi-gente-quedadas,mi-gente-preprod"
+CRONS = "*/5 * * * *|2,7,12,17,22,27,32,37,42,47,52,57 * * * *"
 VAPID_PUBLIC = "BO45OxzLDWlsc91BLJX_J7r7aQCRkSUdhz5SvCMa1nGOyUXZugC9zK37ickXPYrupfmRhLGItQZSaA-eIyqtRUU"
 
 [observability]

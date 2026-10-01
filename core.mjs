@@ -73,8 +73,11 @@ function firestore(base, dry) {
 
 // ---------- Madrid time ----------
 
-const madridDay = t => new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' }).format(t);
-const madridHour = t => Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' }).format(t));
+// made once: building a formatter is the slow part, and the Worker's free plan counts every millisecond of CPU
+const DAY = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Madrid', year: 'numeric', month: '2-digit', day: '2-digit' });
+const HOUR_OF = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Madrid', hour: '2-digit', hourCycle: 'h23' });
+const madridDay = t => DAY.format(t);
+const madridHour = t => Number(HOUR_OF.format(t));
 
 // ---------- The goat farm (mirrors src/lib/goats/model.ts in the app) ----------
 
