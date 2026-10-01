@@ -16,12 +16,16 @@ on:
 jobs:
   send:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # a scheduled run stays up for ~3 h and sends every 10 minutes: GitHub fires schedules late and irregularly (the
+    # first one came 5 h after the repo was made), so one that does arrive covers the gaps. A run started by hand
+    # sends once.
+    timeout-minutes: 185
     strategy:
       fail-fast: false
       matrix:
         project: [mi-gente-quedadas, mi-gente-preprod]
-    # one run at a time per project, so two never write the sent-list over each other
+    # one run at a time per project, so two never write the sent-list over each other (a scheduled run that arrives
+    # while one is looping waits its turn, and starts when that one ends)
     concurrency:
       group: avisos-${{ matrix.project }}
       cancel-in-progress: false
@@ -32,8 +36,15 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: node send.mjs
+      - run: |
+          end=$(( $(date +%s) + LOOP_MINUTES * 60 ))
+          while :; do
+            node send.mjs || echo "this round failed; the next one tries again"
+            [ "$(date +%s)" -ge "$end" ] && break
+            sleep 600
+          done
         env:
+          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '170' || '0' }}
           PROJECT: ${{ matrix.project }}
           VAPID_PUBLIC: ${{ secrets.VAPID_PUBLIC }}
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
