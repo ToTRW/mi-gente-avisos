@@ -15,6 +15,9 @@ on:
       loop_minutes:
         description: 'Quedarse mandando cada 10 minutos durante estos minutos (0 = una vez; 170 = como las programadas)'
         default: '0'
+      chain:
+        description: 'Al terminar, lanzar la siguiente (1) para que el envío no pare nunca'
+        default: '0'
 
 jobs:
   send:
@@ -53,3 +56,17 @@ jobs:
           VAPID_PRIVATE: ${{ secrets.VAPID_PRIVATE }}
           DRY_RUN: ${{ inputs.dry_run || '0' }}
           TEST_TO: ${{ inputs.test_to || '' }}
+
+  next:
+    # keeps the sender going: when a looping run ends, it starts the next one. GitHub's own schedule fires far too
+    # rarely to rely on (once in the first 14 hours); it stays as the backup that restarts the chain if it breaks.
+    # Not after a run cancelled while waiting its turn, or two chains would keep cancelling and restarting each other.
+    needs: send
+    if: ${{ always() && needs.send.result != 'cancelled' && needs.send.result != 'skipped' && (github.event_name == 'schedule' || inputs.chain == '1') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh workflow run avisos.yml -R "$GITHUB_REPOSITORY" -f loop_minutes=170 -f chain=1
+        env:
+          GH_TOKEN: ${{ github.token }}

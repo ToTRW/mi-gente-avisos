@@ -1,8 +1,8 @@
 # Mi Gente · avisos
 
 Las notificaciones de [Mi Gente](https://mi-gente-quedadas.web.app): cada 10 minutos, GitHub Actions ejecuta
-`send.mjs` (cada ejecución programada se queda unas 3 horas mandando cada 10 minutos, porque GitHub lanza los horarios
-tarde y a saltos; la siguiente espera su turno), que lee la base de datos de la app (planes, chat, toques y la granja de cabritas) y envía avisos Web
+`send.mjs` (cada ejecución se queda unas 3 horas mandando cada 10 minutos y, al terminar, lanza la siguiente: GitHub lanza
+los horarios tarde y a saltos, y el horario queda solo de reserva por si la cadena se corta), que lee la base de datos de la app (planes, chat, toques y la granja de cabritas) y envía avisos Web
 Push a los dispositivos donde cada persona los ha activado.
 
 - Qué se avisa: plan nuevo, hora fijada, plan aplazado o con fechas cambiadas, recordatorio de respuesta, chat,
