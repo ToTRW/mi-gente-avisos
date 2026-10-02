@@ -27,4 +27,10 @@ tener un servicio encendido todo el día va contra sus condiciones. El cron de C
 - `npm run dev`, y luego `curl "http://127.0.0.1:8787/__scheduled?cron=*/5+*+*+*+*"`: una ronda del Worker en
   local. Con un `.dev.vars` (no se sube) que tenga `VAPID_PRIVATE`, `PROJECTS`, y para el emulador local
   `FIRESTORE_BASE` e `IGNORE_QUIET=1`.
+- «Probar avisos» (Admin de la app): un admin elige personas y la app escribe la petición en `config/push-test`
+  (`{ id, to: [nombres], text, by, at }`). En la siguiente ronda (menos de 5 minutos) el Worker manda la prueba a los
+  móviles de esas personas, y solo de esas, sin respetar las horas de silencio, y escribe en el mismo documento
+  `results` (`{ nombre: { devices, sent, failed, expired?, error?, unknown? } }`) y `doneAt`, que la app enseña.
+  Nunca guarda claves ni direcciones de suscripción: solo cuentas y el código de estado. Una suscripción caducada
+  se borra, como en cualquier ronda. Una petición de hace más de 30 minutos ya no sale.
 - Aviso de prueba a una persona: Actions → Avisos → Run workflow → `test_to` = nombre.
