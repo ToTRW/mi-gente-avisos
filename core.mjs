@@ -24,14 +24,17 @@ const value = v => v == null ? undefined
   : undefined;
 const fields = f => Object.fromEntries(Object.entries(f || {}).map(([k, v]) => [k, value(v)]));
 // the document's own id is `_doc` (a goat has an `id` field of its own)
-const docOf = d => ({ ...fields(d.fields), _doc: d.name.split('/').pop() });
+// (and `_updateTime`, so a write can say "only if nobody changed it since I read it")
+const docOf = d => ({ ...fields(d.fields), _doc: d.name.split('/').pop(), _updateTime: d.updateTime });
 const quote = s => /^[A-Za-z_][A-Za-z_0-9]*$/.test(s) ? s : '`' + s.replace(/[`\\]/g, m => '\\' + m) + '`';
 
 /** Only these fields come back (the Worker's free plan counts every millisecond spent reading what it doesn't use). */
 const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&') : '';
 // what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
 const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
-  'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt'];
+  'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
+  // «Probar avisos» (config/push-test)
+  'by', 'text', 'at', 'doneAt', 'results'];
 
 function firestore(base, dry) {
   return {
@@ -67,12 +70,21 @@ function firestore(base, dry) {
       if (!r.ok) throw new Error(`query ${collection}: ${r.status} ${await r.text()}`);
       return (await r.json()).filter(x => x.document).map(x => ({ ...docOf(x.document), _at: x.document.fields?.[field]?.timestampValue }));
     },
-    /** Writes the named fields of config/<id> (a field left out of `data` is deleted). */
-    async patch(id, data, paths) {
+    /**
+     * Writes the named fields of config/<id> (a field left out of `data` is deleted). With `updateTime` (a document's
+     * `_updateTime`) it only writes if the document has not changed since: otherwise it throws FAILED_PRECONDITION.
+     */
+    async patch(id, data, paths, updateTime = '') {
       if (dry) return;
-      const encode = v => typeof v === 'string' ? { stringValue: v } : typeof v === 'number' ? { doubleValue: v } : { nullValue: null };
+      const encode = v => typeof v === 'string' ? { stringValue: v }
+        : typeof v === 'number' ? (Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v })
+        : typeof v === 'boolean' ? { booleanValue: v }
+        : Array.isArray(v) ? { arrayValue: { values: v.map(encode) } }
+        : v && typeof v === 'object' ? { mapValue: { fields: Object.fromEntries(Object.entries(v).filter(([, x]) => x !== undefined).map(([k, x]) => [k, encode(x)])) } }
+        : { nullValue: null };
       const body = { fields: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, encode(v)])) };
-      const mask = paths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p.map(quote).join('.'))}`).join('&');
+      const mask = paths.map(p => `updateMask.fieldPaths=${encodeURIComponent(p.map(quote).join('.'))}`).join('&')
+        + (updateTime ? `&currentDocument.updateTime=${encodeURIComponent(updateTime)}` : '');
       const r = await fetch(`${base}/config/${id}?${mask}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
       if (!r.ok) throw new Error(`patch ${id}: ${r.status} ${await r.text()}`);
     },
@@ -102,6 +114,27 @@ function needsAt(goat, now) {
   return { food: Math.max(20, clamp((n.food ?? 75) - foodDecay(goat) * hours)), mood: Math.max(20, clamp((n.mood ?? 75) - 2 * hours)) };
 }
 const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
+
+// ---------- «Probar avisos» (Admin: config/push-test) ----------
+// An admin picks people in the app, which writes { id, to: [names], text, by, at } to config/push-test. The next round
+// sends each of them a test notification right away (quiet hours and batching don't apply) and writes back
+// `results` ({ [name]: { devices, sent, failed, expired?, error?, unknown? } }) and `doneAt`, which the app shows. The
+// results only ever hold counts and a short reason: never an endpoint, a key or the push service's own reply.
+
+const TEST_FRESH = 30 * 60_000; // an older request is not sent (the app says it never left)
+const TEST_MAX_PEOPLE = 8;
+const TEST_TEXT_MAX = 140;
+
+/** The request waiting in config/push-test, cleaned: { id, to, text, updateTime }; null when there is none (or it is done, old, or not an admin's). */
+export function pendingPushTest(d, admins, now) {
+  if (!d || typeof d.id !== 'string' || !d.id || d.doneAt || !Array.isArray(d.to)) return null;
+  if (typeof d.at !== 'number' || now - d.at > TEST_FRESH) return null;
+  if (!admins.includes(d.by)) return null; // the app only lets admins ask; so does the Worker
+  const to = [...new Set(d.to.filter(n => typeof n === 'string' && n))].slice(0, TEST_MAX_PEOPLE);
+  if (!to.length) return null;
+  const text = typeof d.text === 'string' ? d.text.replace(/\s+/g, ' ').trim().slice(0, TEST_TEXT_MAX) : '';
+  return { id: d.id, to, text: text || 'Prueba de avisos', updateTime: d._updateTime || '' };
+}
 
 /**
  * One round for one Firebase project.
@@ -146,11 +179,15 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
   const prefs = byId.preferences || {};
-  const { _doc, ...subs } = pushSubs || {};
+  const { _doc, _updateTime, ...subs } = pushSubs || {};
   let state = {};
   try { state = JSON.parse(byId['push-state']?.json || '{}'); } catch { state = {}; }
   const first = typeof state.logs !== 'string';
   if (first) state.logs = state.chat = new Date(NOW).toISOString(); state.sent ??= {}; state.low ??= {}; state.boxSeen ??= {}; state.missed ??= {}; state.queue ??= {};
+
+  // «Probar avisos»: a request from an admin, to be sent to exactly the people it names
+  const test = pendingPushTest(byId['push-test'], admins, NOW);
+  const testDevices = test ? test.to.reduce((n, p) => n + (friends.includes(p) ? Object.keys(subs[p] || {}).length : 0), 0) : 0;
 
   /** { to, title, body, url, tag } */
   const out = [];
@@ -259,7 +296,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   if (!QUIET) {
     // a round sends at most MAX_PUSHES (each one is encryption the Worker's CPU limit counts); whoever doesn't fit
     // keeps their queue for the next round, five minutes later (the first person always fits)
-    let budget = MAX_PUSHES;
+    let budget = Math.max(0, MAX_PUSHES - testDevices); // the test's pushes use the round's CPU too
     for (const [person, items] of Object.entries(state.queue)) {
       if (!items.length) continue;
       // several for one person become one
@@ -279,6 +316,28 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   // send
   const gone = [];
   let delivered = 0;
+  // the test first: each named person's devices, whatever the hour
+  const results = {};
+  if (test) {
+    const payload = JSON.stringify({ title: '🔔 Mi Gente · prueba', body: test.text, url: '/', tag: 'test' });
+    for (const person of test.to) {
+      if (!friends.includes(person)) { results[person] = { devices: 0, sent: 0, failed: 0, unknown: true }; continue; }
+      const devices = Object.entries(subs[person] || {});
+      const r = results[person] = { devices: devices.length, sent: 0, failed: 0 };
+      for (const [id, sub] of devices) {
+        if (dry) { log(`[dry] test ${person} (${id}): ${test.text}`); continue; }
+        try {
+          const res = await sendPush({ endpoint: sub.endpoint, keys: sub.keys }, payload, { subject: APP, publicKey: vapidPublic, privateKey: vapidPrivate });
+          if (res.status >= 200 && res.status < 300) r.sent++;
+          else if (res.status === 404 || res.status === 410) { r.failed++; r.expired = (r.expired || 0) + 1; gone.push([person, id]); }
+          else { r.failed++; r.error = `rechazado (${res.status})`; }
+        } catch {
+          r.failed++; r.error = 'no se pudo enviar'; // never the exception's own text: it can carry the endpoint
+        }
+      }
+      log(`test ${test.id}: ${person}: ${r.devices} devices, ${r.sent} sent, ${r.failed} failed`);
+    }
+  }
   for (const s of sends) {
     const devices = Object.entries(subs[s.to] || {});
     for (const [id, sub] of devices) {
@@ -297,8 +356,14 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
   if (gone.length) await db.patch('push-subs', {}, gone.map(([p, id]) => [p, id]));
 
+  // tell the app how the test went, unless someone asked for a new one in the meantime (then that one is next round's)
+  if (test && !dry) {
+    try { await db.patch('push-test', { doneAt: Date.now(), results }, [['doneAt'], ['results']], test.updateTime); }
+    catch (e) { log(/FAILED_PRECONDITION|ABORTED/.test(e.message) ? `test ${test.id}: replaced by a newer request, results not saved` : `test ${test.id}: results not saved: ${e.message}`); }
+  }
+
   await db.patch('push-state', { json: JSON.stringify(state) }, [['json']]);
-  const summary = `${project}: ${logs.length} log entries, ${messages.length} messages; ${out.length} new, ${sends.length} to send${QUIET ? ' (quiet hours: queued)' : ''}, ${delivered} delivered, ${gone.length} dead subscriptions removed${first ? ' (first run: starting point set)' : ''}`;
+  const summary = `${project}: ${logs.length} log entries, ${messages.length} messages; ${out.length} new, ${sends.length} to send${QUIET ? ' (quiet hours: queued)' : ''}, ${delivered} delivered, ${gone.length} dead subscriptions removed${test ? `, test to ${test.to.length}` : ''}${first ? ' (first run: starting point set)' : ''}`;
   log(summary);
   return summary;
 }
