@@ -33,8 +33,8 @@ const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.f
 // what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
 const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
   'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
-  // «Probar avisos» (config/push-test)
-  'by', 'text', 'at', 'doneAt', 'results'];
+  // «Probar avisos» (config/push-test): only whether it is done; the results are written, never read
+  'by', 'text', 'at', 'doneAt'];
 
 function firestore(base, dry) {
   return {
