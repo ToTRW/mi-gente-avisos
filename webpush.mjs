@@ -55,9 +55,10 @@ export async function encrypt(payload, keys) {
 
 /**
  * Sends one notification. Resolves to the push service's status: 201 delivered, 404/410 the subscription is gone
- * (the caller drops it), anything else an error worth logging.
+ * (the caller drops it), anything else an error worth logging. Urgency is high: on Android a phone dozing (battery
+ * saving) holds normal ones until it wakes by itself, sometimes for hours (Vane's, Oct 2 2026); these are a few a day.
  */
-export async function sendPush(sub, payload, { subject, publicKey, privateKey, ttl = 6 * 3600, urgency = 'normal' }) {
+export async function sendPush(sub, payload, { subject, publicKey, privateKey, ttl = 6 * 3600, urgency = 'high' }) {
   const body = await encrypt(payload, sub.keys);
   const r = await fetch(sub.endpoint, {
     method: 'POST',
