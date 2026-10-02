@@ -35,8 +35,8 @@ const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id'
   'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
   // «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
   'kind', 'by', 'text', 'at', 'resolved',
-  // «Probar avisos» (config/push-test)
-  'doneAt', 'results'];
+  // «Probar avisos» (config/push-test): only whether it is done; the results are written, never read
+  'doneAt'];
 
 function firestore(base, dry) {
   return {
