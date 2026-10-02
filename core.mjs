@@ -181,7 +181,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
   // plans: from the activity log
-  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names']);
+  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names', 'until', 'reason']);
   const events = {};
   const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name']).catch(() => null)) : null;
   for (const entry of logs) {
@@ -196,6 +196,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`));
     if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`));
     if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`));
+    if (entry.action === 'late:set') people.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`));
   }
 
   // the chat: one notification per person for however many messages came in
