@@ -6,7 +6,7 @@
   "scripts": {
     "send": "node send.mjs",
     "dry": "DRY_RUN=1 node send.mjs",
-    "test": "node --test test/webpush.test.mjs test/pushtest.test.mjs",
+    "test": "node --test test/webpush.test.mjs test/bugs.test.mjs test/late.test.mjs test/pushtest.test.mjs",
     "dev": "wrangler dev --test-scheduled",
     "deploy": "wrangler deploy"
   },

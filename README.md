@@ -9,6 +9,7 @@ de comandos (`send.mjs`).
 - Qué se avisa: plan nuevo, hora fijada, plan aplazado o con fechas cambiadas, recordatorio de respuesta, chat,
   toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza, caja sin abrir, racha en peligro
   (a partir de las 20:00) y eventos (cuando empiezan y su último día).
+  Y a los admins, un informe de «Reportar un fallo» nuevo (el de las últimas 24 horas que sigue abierto; no a quien lo mandó).
 - Nada entre las 23:00 y las 9:00 (hora de Madrid): se guardan para la mañana, y si son muchos llegan en uno.
 - Lo ya avisado se guarda en `config/push-state`, así que no se repite nada.
 - Las claves: `VAPID_PUBLIC` está en `wrangler.toml` (y en la app); `VAPID_PRIVATE` es un secreto del Worker

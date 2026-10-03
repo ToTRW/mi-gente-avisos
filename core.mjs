@@ -33,8 +33,10 @@ const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.f
 // what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
 const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
   'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
+  // «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
+  'kind', 'by', 'text', 'at', 'resolved',
   // «Probar avisos» (config/push-test): only whether it is done; the results are written, never read
-  'by', 'text', 'at', 'doneAt'];
+  'doneAt'];
 
 function firestore(base, dry) {
   return {
@@ -114,6 +116,27 @@ function needsAt(goat, now) {
   return { food: Math.max(20, clamp((n.food ?? 75) - foodDecay(goat) * hours)), mood: Math.max(20, clamp((n.mood ?? 75) - 2 * hours)) };
 }
 const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
+
+// ---------- Bug reports («Reportar un fallo»: config/bug-<ms>-<random>) ----------
+
+const BUG_ID = /^bug-\d{10,}-[0-9a-z]{6}$/;
+const BUG_FRESH = 24 * HOUR; // an older one is not news (and the first round after this shipped must not announce the backlog)
+
+/** The first words of a report, on one line, cut at a word. */
+export function bugSnippet(text, max = 80) {
+  const flat = String(text || '').replace(/\s+/g, ' ').trim();
+  if (flat.length <= max) return flat;
+  const cut = flat.slice(0, max), space = cut.lastIndexOf(' ');
+  return (space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '') + '…';
+}
+
+/** The reports sent in the last day that are still open: [{ id, by, text }], oldest first. */
+export function freshBugReports(config, now) {
+  return config
+    .filter(d => BUG_ID.test(d._doc) && d.kind === 'bug' && d.resolved !== true && typeof d.at === 'number' && now - d.at < BUG_FRESH)
+    .sort((a, b) => a.at - b.at)
+    .map(d => ({ id: d._doc, by: d.by || 'Alguien', text: d.text }));
+}
 
 // ---------- «Probar avisos» (Admin: config/push-test) ----------
 // An admin picks people in the app, which writes { id, to: [names], text, by, at } to config/push-test. The next round
@@ -195,7 +218,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
   // plans: from the activity log
-  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names']);
+  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names', 'until', 'reason']);
   const events = {};
   const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name']).catch(() => null)) : null;
   for (const entry of logs) {
@@ -210,6 +233,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`));
     if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`));
     if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`));
+    if (entry.action === 'late:set') people.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`));
   }
 
   // the chat: one notification per person for however many messages came in
@@ -231,6 +255,10 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     for (const [from, n] of Object.entries(missed)) if (n > (seen[from] || 0)) say(p._doc, `👉 ${from} te ha dado un toque`, 'Entra a ver qué quiere', '/', `poke-${from}`);
     state.missed[p._doc] = missed;
   }
+
+  // a new bug report: every admin but the one who sent it
+  for (const r of freshBugReports(config, NOW))
+    once(`bug:${r.id}`, () => admins.filter(a => a !== r.by).forEach(a => say(a, `🐞 Nuevo fallo de ${r.by}`, bugSnippet(r.text) || 'Mira el informe en Admin', '/?admin', `bug-${r.id}`)));
 
   // the farm, for whoever can play it
   if (prefs.farmEnabled) {
