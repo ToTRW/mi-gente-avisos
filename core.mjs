@@ -235,12 +235,14 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const say = (to, title, body, url = '/', tag, kind) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag, kind }); };
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
-  // a new version of the app: everyone with avisos on hears it once (a newer notice replaces an older one, also in the morning queue).
+  // a new version of the app with something new in it: everyone with avisos on hears it once (a newer notice replaces an older one, also in the morning queue).
   // The first time there is no version on record: it is only written down.
   if (appVersion) {
     const known = state.appVersion;
     state.appVersion = appVersion;
-    if (known && known !== appVersion) once(`app:${appVersion}`, () => {
+    // a patch (3.20.1 > 3.20.2) is fixes only and goes out quietly; new things (3.21.0, 4.0.0) are announced
+    const minor = v => String(v).split('.').slice(0, 2).join('.');
+    if (known && minor(known) !== minor(appVersion)) once(`app:${appVersion}`, () => {
       for (const q of Object.values(state.queue)) for (let i = q.length - 1; i >= 0; i--) if (q[i].tag === 'app-update') q.splice(i, 1);
       Object.keys(subs).filter(p => Object.keys(subs[p] || {}).length).forEach(p => say(p, '✨ Mi Gente se ha actualizado', `Versión ${appVersion}: toca para ver las novedades`, '/?novedades', 'app-update', 'app-update'));
     });

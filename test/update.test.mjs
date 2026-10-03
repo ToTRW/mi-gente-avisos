@@ -126,12 +126,12 @@ test('a deploy at night waits for the morning, and two deploys overnight are one
   w.site.version = '3.20.0';
   await w.round(NIGHT);
   assert.deepEqual(w.hits, [], 'quiet hours');
-  w.site.version = '3.20.1';
+  w.site.version = '3.21.0';
   await w.round(NIGHT + 60 * 60_000);
   assert.deepEqual(w.hits, []);
   await w.round(MORNING);
   assert.equal(w.hits.length, 1);
-  assert.equal(read(w, vane).body, 'Versión 3.20.1: toca para ver las novedades');
+  assert.equal(read(w, vane).body, 'Versión 3.21.0: toca para ver las novedades');
   await w.round(MORNING + 5 * 60_000);
   assert.deepEqual(w.hits, [], 'and only once');
 });
@@ -145,4 +145,18 @@ test('preprod never asks for the live version and never sends an update notice',
   assert.deepEqual(w.versionUrls, []);
   assert.deepEqual(w.hits, []);
   assert.equal(JSON.parse(w.state).appVersion, undefined);
+});
+
+test('a patch (fixes only) goes out quietly, and the next minor is still announced', async () => {
+  const vane = device('vane', 1);
+  const w = world({ subs: { Vane: [vane] }, version: '3.20.1' });
+  await w.round(DAY);
+  w.site.version = '3.20.2';
+  await w.round(DAY + 5 * 60_000);
+  assert.deepEqual(w.hits, []);
+  assert.equal(JSON.parse(w.state).appVersion, '3.20.2');
+  w.site.version = '3.21.0';
+  await w.round(DAY + 10 * 60_000);
+  assert.deepEqual(w.hits, [vane.endpoint]);
+  assert.equal(read(w, vane).body, 'Versión 3.21.0: toca para ver las novedades');
 });
