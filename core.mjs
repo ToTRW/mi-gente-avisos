@@ -146,6 +146,8 @@ export function energyAt(goat, now) {
   }
   return Math.max(NEEDS_FLOOR, clamp(e));
 }
+/** Where the full-energy notice is on: add 'mi-gente-quedadas' at the prod pass that ships the slower refill (3.25.0). */
+const ENERGY_NOTICE_IN = new Set(['mi-gente-preprod']);
 const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
 // Energy is told the other way round: only when she is full again, and only if she had dropped under 60 first (a goat
 // that slept from 78 to 100 every night would otherwise ping every morning). «Full» is 99 and not 100 because by day
@@ -354,7 +356,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       }
       // full of energy again: once per cycle (she had to drop under ENERGY_LOW first). At night she fills in bed, so this
       // is queued for the morning like everything else, and it is still true then: she stays in bed full until 07:00
-      const energy = energyAt(goat, NOW);
+      // (preprod only until the prod pass: energyAt follows preprod's slower refill, prod still has the old one)
+      const energy = ENERGY_NOTICE_IN.has(project) ? energyAt(goat, NOW) : 100;
       if (energy < ENERGY_LOW) low.energy = true;
       else if (energy >= ENERGY_FULL && low.energy) { low.energy = false; say(owner, `⚡ ${goat.name} tiene la energía a tope`, 'Lista para jugar o salir de excursión', url, `energy-${gid}`, 'farm:energy'); }
       // a box waiting for an hour
