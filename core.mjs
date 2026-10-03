@@ -249,20 +249,28 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   // plans: from the activity log
   const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names', 'until', 'reason']);
   const events = {};
-  const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name']).catch(() => null)) : null;
+  const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name', 'availability', 'rsvpStatus']).catch(() => null)) : null;
+  // someone who answered «no» is still on the list, but the plan isn't theirs any more (the app's isMyPlan says the same)
+  const saidNo = (ev, p) => {
+    const rsvp = ev?.rsvpStatus || {}, avail = ev?.availability || {};
+    if (Object.hasOwn(rsvp, p)) return rsvp[p] === 'no';
+    return Object.hasOwn(avail, p) && Array.isArray(avail[p]) && avail[p].length === 0;
+  };
   for (const entry of logs) {
     if (entry._at) state.logs = entry._at;
     const ev = await eventOf(entry.eventId);
     const who = entry.actor || 'Alguien', name = entry.eventName || ev?.name || 'un plan';
     const people = (ev?.participants ?? friends).filter(p => p !== who);
+    // the time fixed and «llega tarde» only matter to whoever is still going; new dates (or a postponed plan) ask everyone again
+    const going = people.filter(p => !saidNo(ev, p));
     const url = entry.eventId ? `/?evento=${encodeURIComponent(entry.eventId)}` : '/';
     if (entry.action === 'event:create') people.forEach(p => say(p, `📅 ${who} ha creado un plan`, name, url, `plan-${entry.eventId}`, 'plan:create'));
-    if (entry.action === 'event:lock') people.forEach(p => say(p, `🔒 Hora fijada`, `${name}${entry.range ? ` · ${entry.range}` : ''}`, url, `plan-${entry.eventId}`, 'plan:lock'));
+    if (entry.action === 'event:lock') going.forEach(p => say(p, `🔒 Hora fijada`, `${name}${entry.range ? ` · ${entry.range}` : ''}`, url, `plan-${entry.eventId}`, 'plan:lock'));
     if (entry.action === 'event:postpone') people.forEach(p => say(p, `⏩ ${who} ha aplazado un plan`, `${name}: vuelve a marcar tus horas`, url, `plan-${entry.eventId}`, 'plan:postpone'));
     if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`, 'plan:dates'));
     if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge'));
     if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge-maybe'));
-    if (entry.action === 'late:set') people.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`, 'late'));
+    if (entry.action === 'late:set') going.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`, 'late'));
   }
 
   // the chat: one notification per person for however many messages came in
