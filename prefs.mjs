@@ -22,6 +22,7 @@ export const KIND_CATEGORY = {
   'chat': 'chat',
   'poke': 'toques',                 // zumbidos that arrived while they were away
   'farm:need': 'cabrita',           // hungry, sad
+  'farm:energy': 'cabrita',         // full of energy again
   'farm:box': 'cabrita',
   'farm:gift': 'cabrita',
   'farm:trip': 'cabrita',

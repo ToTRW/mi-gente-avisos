@@ -35,7 +35,7 @@ const quote = s => /^[A-Za-z_][A-Za-z_0-9]*$/.test(s) ? s : '`' + s.replace(/[`\
 const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&') : '';
 // what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
 const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
-  'owner', 'soloTrip', 'needs', 'restedAt', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
+  'owner', 'soloTrip', 'needs', 'restedAt', 'asleep', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
   // «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
   'kind', 'by', 'text', 'at', 'resolved',
   // «Probar avisos» (config/push-test): only whether it is done; the results are written, never read
@@ -118,7 +118,41 @@ function needsAt(goat, now) {
   const n = goat.needs || {};
   return { food: Math.max(20, clamp((n.food ?? 75) - foodDecay(goat) * hours)), mood: Math.max(20, clamp((n.mood ?? 75) - 2 * hours)) };
 }
+// Her energy, ported from the app's energyWalk (src/lib/goats/model.ts, with the test builds' nightShift left out):
+// it walks from the saved moment to `now` in pieces, because the rates change at 22:00 and 07:00 in Madrid. In bed (put
+// there, or by the night) it fills; by day she gets up by herself once it is full, at night she stays in bed full till
+// morning; awake it drains. Same floor, same maths: test/energy.test.mjs pins the numbers the app gives.
+const NEEDS_FLOOR = 20;
+const BED_SLEEP_FACTOR = 1.5, AWAKE_DRAIN = 1.5, NIGHT_FROM = 22, NIGHT_TO = 7;
+const sleepGain = goat => goat.personality === 'dormilona' ? 78 : 60;
+export function energyAt(goat, now) {
+  let t = goat.restedAt || now, e = goat.needs?.energy ?? 75, asleep = goat.asleep === true;
+  const end = Math.max(t, now);
+  while (t < end) {
+    const h = (((t / HOUR + madridOffset(t)) % 24) + 24) % 24;
+    const night = h >= NIGHT_FROM || h < NIGHT_TO;
+    const toEdge = night ? (h >= NIGHT_FROM ? 24 - h + NIGHT_TO : NIGHT_TO - h) : NIGHT_FROM - h;
+    const segEnd = Math.min(end, t + Math.max(toEdge, 1e-6) * HOUR);
+    const hours = (segEnd - t) / HOUR;
+    if (asleep || night) {
+      const rate = sleepGain(goat) * BED_SLEEP_FACTOR * (night ? 0.5 : 1), need = Math.max(0, (100 - e) / rate);
+      if (need <= hours) {
+        if (!night) { t += need * HOUR; e = 100; asleep = false; continue; }
+        e = 100;
+      } else e += rate * hours;
+      if (night && !asleep) asleep = true;
+    } else e -= AWAKE_DRAIN * (night ? 2 : 1) * hours;
+    t = segEnd;
+  }
+  return Math.max(NEEDS_FLOOR, clamp(e));
+}
 const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
+// Energy is told the other way round: only when she is full again, and only if she had dropped under 60 first (a goat
+// that slept from 78 to 100 every night would otherwise ping every morning). «Full» is 99 and not 100 because by day
+// she gets up the moment she reaches 100 and starts tiring (1.5 an hour), so the round that sees her would otherwise
+// never find exactly 100: 99 gives a round forty minutes to catch her. One that misses her is not lost: she is armed
+// still, and the night fills her again (in bed she holds 100 until morning). Full says it, and disarms it.
+const ENERGY_LOW = 60, ENERGY_FULL = 99;
 
 // ---------- Bug reports («Reportar un fallo»: config/bug-<ms>-<random>) ----------
 
@@ -318,6 +352,11 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
         if (n[need] <= LOW && !low[need]) { low[need] = true; say(owner, title, need === 'food' ? 'Pásate a darle de comer' : 'Pásate a hacerle caso', url, `need-${gid}`, 'farm:need'); }
         if (n[need] >= BACK) low[need] = false;
       }
+      // full of energy again: once per cycle (she had to drop under ENERGY_LOW first). At night she fills in bed, so this
+      // is queued for the morning like everything else, and it is still true then: she stays in bed full until 07:00
+      const energy = energyAt(goat, NOW);
+      if (energy < ENERGY_LOW) low.energy = true;
+      else if (energy >= ENERGY_FULL && low.energy) { low.energy = false; say(owner, `⚡ ${goat.name} tiene la energía a tope`, 'Lista para jugar o salir de excursión', url, `energy-${gid}`, 'farm:energy'); }
       // a box waiting for an hour
       if ((goat.boxes || []).length) {
         const seen = state.boxSeen[gid] ||= NOW;

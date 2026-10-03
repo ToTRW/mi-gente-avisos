@@ -189,10 +189,11 @@ test('every kind the round sends is in the table (all of them, queued at night)'
       'bug-1777777777777-abc123': { kind: 'bug', by: 'Vane', text: 'se rompe', at: NIGHT - 60_000 },
       'goat-g1': { owner: 'Vane', name: 'Lola', restedAt: old, needs: { food: 70, mood: 70 }, boxes: ['x'], streak: { count: 5, day: '2026-10-02' }, soloTrip: { id: 't1', collected: false, startedAt: old, durationMs: 1000 } },
       'goat-g2': { owner: 'Guille', name: 'Pepa', restedAt: NIGHT },
+      'goat-g3': { owner: 'Alex', name: 'Nina', restedAt: NIGHT - 3 * 3_600_000, asleep: true, needs: { food: 70, mood: 70, energy: 20 } }, // full again by now, and seen low before
       'farm-costume-gift-1': { status: 'pending', toGoatId: 'g1', fromGoatId: 'g2', offeredAt: 5 },
       'farm-event': { id: 'ev1', from: NIGHT - 3_600_000, to: NIGHT + 3_600_000, name: 'Fiesta' },
     },
-    state: { logs: new Date(NIGHT - 60_000).toISOString(), chat: new Date(NIGHT - 60_000).toISOString(), boxSeen: { g1: old } },
+    state: { logs: new Date(NIGHT - 60_000).toISOString(), chat: new Date(NIGHT - 60_000).toISOString(), boxSeen: { g1: old }, low: { g3: { energy: true } } },
   });
   await w.round(NIGHT);
   const queued = Object.values(JSON.parse(w.state).queue).flat();

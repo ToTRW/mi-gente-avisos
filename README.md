@@ -7,7 +7,7 @@ y el cifrado de Web Push en `webpush.mjs` (solo WebCrypto, sin dependencias), as
 de comandos (`send.mjs`).
 
 - Qué se avisa: plan nuevo, hora fijada, plan aplazado o con fechas cambiadas, recordatorio de respuesta, chat,
-  toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza, caja sin abrir, racha en peligro
+  toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza, energía a tope otra vez, caja sin abrir, racha en peligro
   (a partir de las 20:00) y eventos (cuando empiezan y su último día). Y, solo en producción, cuando la app se
   actualiza: cada ronda lee `/version.json` de la web, y si la versión cambia respecto a la guardada
   (`appVersion` en `config/push-state`) todos los que tienen avisos reciben uno, «Mi Gente se ha actualizado», que abre
