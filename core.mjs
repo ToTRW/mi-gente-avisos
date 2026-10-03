@@ -146,8 +146,8 @@ export function energyAt(goat, now) {
   }
   return Math.max(NEEDS_FLOOR, clamp(e));
 }
-/** Where the full-energy notice is on: add 'mi-gente-quedadas' at the prod pass that ships the slower refill (3.25.0). */
-const ENERGY_NOTICE_IN = new Set(['mi-gente-preprod']);
+/** Where the full-energy notice is on: both, since prod got the slower refill (3.21.0). */
+const ENERGY_NOTICE_IN = new Set(['mi-gente-preprod', 'mi-gente-quedadas']); // prod since 3.21.0 (Oct 3 2026)
 const LOW = 30, BACK = 50; // a need at 30 or less is worth a word; it has to be back over 50 before it can be said again
 // Energy is told the other way round: only when she is full again, and only if she had dropped under 60 first (a goat
 // that slept from 78 to 100 every night would otherwise ping every morning). «Full» is 99 and not 100 because by day
