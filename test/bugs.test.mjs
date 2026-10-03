@@ -46,6 +46,7 @@ function fakeFirestore(docs, writes) {
     if (init.method === 'PATCH') { writes.push(JSON.parse(init.body)); return json({}); }
     if (url.includes('/config?')) return json({ documents: Object.entries(docs).map(([id, o]) => full(id, o)) });
     if (url.includes('/presence?')) return json({});
+    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
     if (url.includes('/config/push-subs')) return json(full('push-subs', {}));
     throw new Error(`unexpected ${url}`);
   };

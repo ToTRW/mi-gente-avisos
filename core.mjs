@@ -5,6 +5,7 @@
 //
 // Plain fetch and WebCrypto only, so the same run() works in Node (send.mjs) and in the Cloudflare Worker (worker.mjs).
 import { sendPush } from './webpush.mjs';
+import { wants } from './prefs.mjs';
 
 const APPS = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' };
 const HOUR = 3_600_000;
@@ -211,13 +212,15 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
 
   // push-subs on its own: its fields are people's names, which a mask can't list
-  const [config, presence, pushSubs, appVersion] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs'),
+  // push-prefs too: who switched which categories off (see prefs.mjs)
+  const [config, presence, pushSubs, pushPrefs, appVersion] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs'), db.get('config/push-prefs'),
     project === RELEASE_PROJECT ? fetchAppVersion(APP, NOW) : '']);
   const byId = Object.fromEntries(config.map(d => [d._doc, d]));
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
   const prefs = byId.preferences || {};
   const { _doc, _updateTime, ...subs } = pushSubs || {};
+  const { _doc: _prefsDoc, _updateTime: _prefsTime, ...prefsOf } = pushPrefs || {};
   let state = {};
   try { state = JSON.parse(byId['push-state']?.json || '{}'); } catch { state = {}; }
   const first = typeof state.logs !== 'string';
@@ -227,9 +230,9 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const test = pendingPushTest(byId['push-test'], admins, NOW);
   const testDevices = test ? test.to.reduce((n, p) => n + (friends.includes(p) ? Object.keys(subs[p] || {}).length : 0), 0) : 0;
 
-  /** { to, title, body, url, tag } */
+  /** { to, title, body, url, tag, kind } */
   const out = [];
-  const say = (to, title, body, url = '/', tag) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag }); };
+  const say = (to, title, body, url = '/', tag, kind) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag, kind }); };
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
   // a new version of the app: everyone with avisos on hears it once (a newer notice replaces an older one, also in the morning queue).
@@ -239,7 +242,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     state.appVersion = appVersion;
     if (known && known !== appVersion) once(`app:${appVersion}`, () => {
       for (const q of Object.values(state.queue)) for (let i = q.length - 1; i >= 0; i--) if (q[i].tag === 'app-update') q.splice(i, 1);
-      Object.keys(subs).filter(p => Object.keys(subs[p] || {}).length).forEach(p => say(p, '✨ Mi Gente se ha actualizado', `Versión ${appVersion}: toca para ver las novedades`, '/?novedades', 'app-update'));
+      Object.keys(subs).filter(p => Object.keys(subs[p] || {}).length).forEach(p => say(p, '✨ Mi Gente se ha actualizado', `Versión ${appVersion}: toca para ver las novedades`, '/?novedades', 'app-update', 'app-update'));
     });
   }
 
@@ -253,13 +256,13 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     const who = entry.actor || 'Alguien', name = entry.eventName || ev?.name || 'un plan';
     const people = (ev?.participants ?? friends).filter(p => p !== who);
     const url = entry.eventId ? `/?evento=${encodeURIComponent(entry.eventId)}` : '/';
-    if (entry.action === 'event:create') people.forEach(p => say(p, `📅 ${who} ha creado un plan`, name, url, `plan-${entry.eventId}`));
-    if (entry.action === 'event:lock') people.forEach(p => say(p, `🔒 Hora fijada`, `${name}${entry.range ? ` · ${entry.range}` : ''}`, url, `plan-${entry.eventId}`));
-    if (entry.action === 'event:postpone') people.forEach(p => say(p, `⏩ ${who} ha aplazado un plan`, `${name}: vuelve a marcar tus horas`, url, `plan-${entry.eventId}`));
-    if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`));
-    if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`));
-    if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`));
-    if (entry.action === 'late:set') people.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`));
+    if (entry.action === 'event:create') people.forEach(p => say(p, `📅 ${who} ha creado un plan`, name, url, `plan-${entry.eventId}`, 'plan:create'));
+    if (entry.action === 'event:lock') people.forEach(p => say(p, `🔒 Hora fijada`, `${name}${entry.range ? ` · ${entry.range}` : ''}`, url, `plan-${entry.eventId}`, 'plan:lock'));
+    if (entry.action === 'event:postpone') people.forEach(p => say(p, `⏩ ${who} ha aplazado un plan`, `${name}: vuelve a marcar tus horas`, url, `plan-${entry.eventId}`, 'plan:postpone'));
+    if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`, 'plan:dates'));
+    if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge'));
+    if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge-maybe'));
+    if (entry.action === 'late:set') people.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`, 'late'));
   }
 
   // the chat: one notification per person for however many messages came in
@@ -271,20 +274,20 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       if (!theirs.length) continue;
       const last = theirs[theirs.length - 1];
       say(person, theirs.length === 1 ? `💬 ${last.name}` : `💬 ${theirs.length} mensajes en el chat`,
-        theirs.length === 1 ? last.text : `${last.name}: ${last.text}`, '/?grupo', 'chat');
+        theirs.length === 1 ? last.text : `${last.name}: ${last.text}`, '/?grupo', 'chat', 'chat');
     }
   }
 
   // pokes that arrived while they were away (presence/<name>.missed = { from: count })
   for (const p of presence) {
     const missed = p.missed || {}, seen = state.missed[p._doc] || {};
-    for (const [from, n] of Object.entries(missed)) if (n > (seen[from] || 0)) say(p._doc, `👉 ${from} te ha dado un toque`, 'Entra a ver qué quiere', '/', `poke-${from}`);
+    for (const [from, n] of Object.entries(missed)) if (n > (seen[from] || 0)) say(p._doc, `👉 ${from} te ha dado un toque`, 'Entra a ver qué quiere', '/', `poke-${from}`, 'poke');
     state.missed[p._doc] = missed;
   }
 
   // a new bug report: every admin but the one who sent it
   for (const r of freshBugReports(config, NOW))
-    once(`bug:${r.id}`, () => admins.filter(a => a !== r.by).forEach(a => say(a, `🐞 Nuevo fallo de ${r.by}`, bugSnippet(r.text) || 'Mira el informe en Admin', '/?admin', `bug-${r.id}`)));
+    once(`bug:${r.id}`, () => admins.filter(a => a !== r.by).forEach(a => say(a, `🐞 Nuevo fallo de ${r.by}`, bugSnippet(r.text) || 'Mira el informe en Admin', '/?admin', `bug-${r.id}`, 'bug')));
 
   // the farm, for whoever can play it
   if (prefs.farmEnabled) {
@@ -298,24 +301,24 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       // back from a trip, with things to pick up
       const trip = goat.soloTrip;
       if (trip && !trip.collected && trip.startedAt + trip.durationMs <= NOW)
-        once(`trip:${trip.id}`, () => say(owner, `🧭 ${goat.name} ha vuelto de la excursión`, 'Trae cosas para recoger', url, `trip-${gid}`));
+        once(`trip:${trip.id}`, () => say(owner, `🧭 ${goat.name} ha vuelto de la excursión`, 'Trae cosas para recoger', url, `trip-${gid}`, 'farm:trip'));
       // hungry or sad: once each time it drops, again only after it's been looked after
       const n = needsAt(goat, NOW), low = state.low[gid] ||= {};
       for (const [need, title] of [['food', `🌾 ${goat.name} tiene hambre`], ['mood', `💔 ${goat.name} está triste`]]) {
-        if (n[need] <= LOW && !low[need]) { low[need] = true; say(owner, title, need === 'food' ? 'Pásate a darle de comer' : 'Pásate a hacerle caso', url, `need-${gid}`); }
+        if (n[need] <= LOW && !low[need]) { low[need] = true; say(owner, title, need === 'food' ? 'Pásate a darle de comer' : 'Pásate a hacerle caso', url, `need-${gid}`, 'farm:need'); }
         if (n[need] >= BACK) low[need] = false;
       }
       // a box waiting for an hour
       if ((goat.boxes || []).length) {
         const seen = state.boxSeen[gid] ||= NOW;
-        if (NOW - seen >= HOUR) once(`box:${gid}:${seen}`, () => say(owner, `📦 ${goat.name} tiene una caja sin abrir`, '¿Qué habrá dentro?', url, `box-${gid}`));
+        if (NOW - seen >= HOUR) once(`box:${gid}:${seen}`, () => say(owner, `📦 ${goat.name} tiene una caja sin abrir`, '¿Qué habrá dentro?', url, `box-${gid}`, 'farm:box'));
       } else delete state.boxSeen[gid];
     }
     // gifts waiting to be accepted
     for (const gift of config.filter(d => d._doc.startsWith('farm-costume-gift-') && d.status === 'pending')) {
       const to = goatById[gift.toGoatId], from = goatById[gift.fromGoatId];
       if (!to || !plays(to.owner)) continue;
-      once(`gift:${gift._doc}:${gift.offeredAt}`, () => say(to.owner, `🎁 ${from?.owner || 'Alguien'} te ha mandado un regalo`, `Para ${to.name}: ábrelo en su parcela`, `/?cabrita=${encodeURIComponent(gift.toGoatId)}`, `gift-${gift.toGoatId}`));
+      once(`gift:${gift._doc}:${gift.offeredAt}`, () => say(to.owner, `🎁 ${from?.owner || 'Alguien'} te ha mandado un regalo`, `Para ${to.name}: ábrelo en su parcela`, `/?cabrita=${encodeURIComponent(gift.toGoatId)}`, `gift-${gift.toGoatId}`, 'farm:gift'));
     }
   }
 
@@ -323,8 +326,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const ev = byId['farm-event'];
   if (prefs.farmEnabled && ev?.id && ev.from <= NOW && NOW < ev.to) {
     const name = ev.name || 'Evento en la granja', players = friends.filter(p => prefs.farmOpen === true || admins.includes(p));
-    once(`event:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `🎉 Empieza: ${name}`, ev.blurb || 'Pásate por la granja.', '/?granja', 'event')));
-    if (ev.to - NOW < 24 * HOUR) once(`event-last:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `⏳ Último día: ${name}`, ev.blurb || 'Mañana se acaba.', '/?granja', 'event')));
+    once(`event:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `🎉 Empieza: ${name}`, ev.blurb || 'Pásate por la granja.', '/?granja', 'event', 'farm:event')));
+    if (ev.to - NOW < 24 * HOUR) once(`event-last:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `⏳ Último día: ${name}`, ev.blurb || 'Mañana se acaba.', '/?granja', 'event', 'farm:event')));
   }
 
   // a streak at stake: from 20:00, a run of three days or more that today's care hasn't counted yet
@@ -333,7 +336,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     for (const goat of config.filter(d => d._doc.startsWith('goat-'))) {
       const s = goat.streak;
       if (!s || s.count < 3 || s.day !== yesterday) continue;
-      once(`streak:${goat._doc}:${today}`, () => say(goat.owner, `☀️ Racha de ${s.count} días`, `Cuida hoy a ${goat.name} para no perderla`, `/?cabrita=${encodeURIComponent(goat._doc.slice(5))}`, 'streak'));
+      once(`streak:${goat._doc}:${today}`, () => say(goat.owner, `☀️ Racha de ${s.count} días`, `Cuida hoy a ${goat.name} para no perderla`, `/?cabrita=${encodeURIComponent(goat._doc.slice(5))}`, 'streak', 'farm:streak'));
     }
   }
 
@@ -345,7 +348,14 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
 
   // quiet hours: keep them for the morning
   for (const o of out) (state.queue[o.to] ||= []).push(o);
-  for (const k of Object.keys(state.queue)) state.queue[k] = state.queue[k].slice(-30);
+  // whatever a person switched off (config/push-prefs) is dropped here, whether it is new or has been waiting: the
+  // choice of the moment it goes out is the one that counts. The test notices never come through here.
+  let muted = 0;
+  for (const k of Object.keys(state.queue)) {
+    const wanted = state.queue[k].filter(o => wants(prefsOf, k, o.kind));
+    muted += state.queue[k].length - wanted.length;
+    state.queue[k] = wanted.slice(-30);
+  }
   const sends = [];
   if (!QUIET) {
     // a round sends at most MAX_PUSHES (each one is encryption the Worker's CPU limit counts); whoever doesn't fit
@@ -417,7 +427,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
 
   await db.patch('push-state', { json: JSON.stringify(state) }, [['json']]);
-  const summary = `${project}: ${logs.length} log entries, ${messages.length} messages; ${out.length} new, ${sends.length} to send${QUIET ? ' (quiet hours: queued)' : ''}, ${delivered} delivered, ${gone.length} dead subscriptions removed${test ? `, test to ${test.to.length}` : ''}${first ? ' (first run: starting point set)' : ''}`;
+  const summary = `${project}: ${logs.length} log entries, ${messages.length} messages; ${out.length} new, ${sends.length} to send${muted ? `, ${muted} muted by preferences` : ''}${QUIET ? ' (quiet hours: queued)' : ''}, ${delivered} delivered, ${gone.length} dead subscriptions removed${test ? `, test to ${test.to.length}` : ''}${first ? ' (first run: starting point set)' : ''}`;
   log(summary);
   return summary;
 }

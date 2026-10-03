@@ -56,6 +56,7 @@ async function round({ docs = {}, subs = {}, pushStatus = () => 201, updateTime 
       return json({});
     }
     if (init.method === 'POST') return json([]);
+    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
     if (url.includes('/config/push-subs')) return json(doc('push-subs', Object.fromEntries(Object.entries(subs).map(([p, ds]) => [p, Object.fromEntries(ds.map((d, i) => [`d${i}`, sub(d)]))]))));
     if (url.includes('/config?')) return json({ documents: Object.entries(config).map(([id, o]) => doc(id, o, id === 'push-test' ? updateTime : undefined)) });
     if (url.includes('/presence?')) return json({});

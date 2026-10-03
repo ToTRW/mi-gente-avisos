@@ -28,6 +28,7 @@ async function round(log) {
     if (url.includes('/config?')) return json({ documents: Object.entries(config).map(([id, o]) => doc(`config/${id}`, o)) });
     if (url.includes('/events/e1')) return json(doc('events/e1', { name: 'Cena', participants: ['Alex', 'Vane', 'Guille'] }));
     if (url.includes('/presence?')) return json({});
+    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
     if (url.includes('/config/push-subs')) return json(doc('config/push-subs', {}));
     throw new Error(`unexpected ${url}`);
   };
