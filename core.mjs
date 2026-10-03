@@ -9,6 +9,8 @@ import { sendPush } from './webpush.mjs';
 const APPS = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' };
 const HOUR = 3_600_000;
 const MAX_PUSHES = 6;
+// the app whose releases everyone hears about (preprod deploys all day: nobody wants a notice for each)
+const RELEASE_PROJECT = 'mi-gente-quedadas';
 
 // ---------- Firestore over REST (the app's rules let it read and write config without signing in) ----------
 
@@ -136,6 +138,18 @@ export function pendingPushTest(d, admins, now) {
   return { id: d.id, to, text: text || 'Prueba de avisos', updateTime: d._updateTime || '' };
 }
 
+// ---------- App updates (the live app's /version.json) ----------
+
+/** The version the live app says it is (version.json: { version, sha, builtAt, mode }), or '' when it can't be read: a failure is never an error. */
+export async function fetchAppVersion(app, now) {
+  try {
+    const r = await fetch(`${app}/version.json?t=${now}`, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return '';
+    const v = (await r.json())?.version;
+    return typeof v === 'string' && /^[\w.+-]{1,40}$/.test(v) ? v : ''; // short and plain: it goes into a notification
+  } catch { return ''; }
+}
+
 /**
  * One round for one Firebase project.
  *   project        mi-gente-quedadas or mi-gente-preprod
@@ -174,7 +188,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
 
   // push-subs on its own: its fields are people's names, which a mask can't list
-  const [config, presence, pushSubs] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs')]);
+  const [config, presence, pushSubs, appVersion] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs'),
+    project === RELEASE_PROJECT ? fetchAppVersion(APP, NOW) : '']);
   const byId = Object.fromEntries(config.map(d => [d._doc, d]));
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
@@ -193,6 +208,17 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const out = [];
   const say = (to, title, body, url = '/', tag) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag }); };
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
+
+  // a new version of the app: everyone with avisos on hears it once (a newer notice replaces an older one, also in the morning queue).
+  // The first time there is no version on record: it is only written down.
+  if (appVersion) {
+    const known = state.appVersion;
+    state.appVersion = appVersion;
+    if (known && known !== appVersion) once(`app:${appVersion}`, () => {
+      for (const q of Object.values(state.queue)) for (let i = q.length - 1; i >= 0; i--) if (q[i].tag === 'app-update') q.splice(i, 1);
+      Object.keys(subs).filter(p => Object.keys(subs[p] || {}).length).forEach(p => say(p, '✨ Mi Gente se ha actualizado', `Versión ${appVersion}: toca para ver las novedades`, '/?novedades', 'app-update'));
+    });
+  }
 
   // plans: from the activity log
   const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names']);
