@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { createECDH, randomBytes } from 'node:crypto';
 import ece from 'http_ece';
 import { run } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 import { CATEGORIES, KIND_CATEGORY, categoryOf, wants } from '../prefs.mjs';
 
 const b64u = b => Buffer.from(b).toString('base64url');
@@ -43,6 +44,11 @@ function world({ prefs, logs = [], messages = [], presence = {}, config = {}, de
     state: JSON.stringify({ logs: new Date(DAY - 60_000).toISOString(), chat: new Date(DAY - 60_000).toISOString(), ...state }),
   };
   w.round = async (now, extra = {}) => {
+    const fs = firestoreStand();
+    Object.assign(fs.config, { users: { list: PEOPLE }, roles: { admins: ['Alex'] }, 'push-state': { json: w.state }, ...w.config },
+      { 'push-subs': Object.fromEntries(Object.entries(w.devices).map(([p, d]) => [p, { d0: { endpoint: d.endpoint, keys: d.keys, at: 1 } }])) },
+      w.prefs === undefined ? {} : { 'push-prefs': w.prefs });
+    Object.assign(fs.presence, w.presence);
     const real = globalThis.fetch;
     const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
     globalThis.fetch = async (url, init = {}) => {
@@ -54,19 +60,14 @@ function world({ prefs, logs = [], messages = [], presence = {}, config = {}, de
         w.patches.push(path);
         return json({});
       }
+      const answered = fs.handle(url, init);
+      if (answered) return answered;
       if (init.method === 'POST') {
         const body = String(init.body);
         const rows = body.includes('activityLogs') ? w.logs.map((o, i) => [`activityLogs/l${i}`, o]) : body.includes('"messages"') ? w.messages.map((o, i) => [`messages/m${i}`, o]) : [];
         return json(rows.map(([path, o]) => ({ document: { ...doc(path, o), updateTime: (o.at ?? o.ts).$ts } })));
       }
-      if (url.includes('/config/push-subs')) return json(doc('config/push-subs', Object.fromEntries(Object.entries(w.devices).map(([p, d]) => [p, { d0: { endpoint: d.endpoint, keys: d.keys, at: 1 } }]))));
-      if (url.includes('/config/push-prefs')) return w.prefs === undefined ? { ok: false, status: 404, json: async () => ({}), text: async () => '' } : json(doc('config/push-prefs', w.prefs));
       if (url.includes('/events/e1')) return json(doc('events/e1', { name: 'Cena', participants: PEOPLE }));
-      if (url.includes('/config?')) {
-        const all = { users: { list: PEOPLE }, roles: { admins: ['Alex'] }, 'push-state': { json: w.state }, ...w.config };
-        return json({ documents: Object.entries(all).map(([id, o]) => doc(`config/${id}`, o)) });
-      }
-      if (url.includes('/presence?')) return json({ documents: Object.entries(w.presence).map(([p, o]) => doc(`presence/${p}`, o)) });
       throw new Error(`unexpected ${url}`);
     };
     w.hits.length = 0;

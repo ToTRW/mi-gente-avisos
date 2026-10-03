@@ -24,6 +24,19 @@ Empezó como un horario de GitHub Actions cada 10 minutos, pero GitHub lanza los
 día se disparó dos veces en 14 horas. Mantenerlo vivo encadenando ejecuciones funcionaba, pero usar Actions para
 tener un servicio encendido todo el día va contra sus condiciones. El cron de Cloudflare se dispara a su hora.
 
+## Lecturas de Firestore
+
+Firestore cobra una lectura por documento devuelto (y una por consulta que no encuentra nada o por documento
+nombrado que no existe), y el plan gratuito se para en 50.000 al día. Una ronda no lista nunca una colección: pide
+solo lo que usa. Seis documentos de `config` con un `batchGet` (`users`, `roles`, `preferences`, `push-state`,
+`push-test`, `farm-event`), `push-subs` y `push-prefs` en otro; consultas con un filtro de un solo campo (no piden
+índice compuesto) para las cabritas (`owner` presente, solo si la granja está encendida), los regalos
+(`status == 'pending'`), los informes de fallo (`at` de las últimas 24 horas) y los toques (`presence` con `missed`,
+que la app borra al verlos); y la consulta de siempre del registro de planes y del chat. Con 8 cabritas, 2 informes
+nuevos y un regalo son unas 22 lecturas por ronda, y eran unas 93 (todo `config`, que crece con cada informe, captura,
+carrera y pareja de la granja, más todo `presence`). `test/reads.test.mjs` cuenta las lecturas, y
+`test/fakefs.mjs` (el Firestore de las pruebas) falla si una ronda vuelve a listar una colección entera.
+
 ## Probar
 
 - `npm test`: el cifrado contra la implementación de referencia (la de la librería `web-push`) y la firma VAPID.

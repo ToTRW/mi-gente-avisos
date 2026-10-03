@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { run } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 
 const NOW = Date.UTC(2026, 9, 2, 17, 0, 0); // 19:00 in Madrid: not quiet hours
 const str = s => ({ stringValue: s });
@@ -18,22 +19,22 @@ async function round(log) {
   const real = globalThis.fetch;
   const doc = (path, o) => ({ name: `projects/p/databases/(default)/documents/${path}`, fields: toFields(o) });
   const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
-  const config = {
+  const fs = firestoreStand();
+  Object.assign(fs.config, {
     users: { list: ['Alex', 'Vane', 'Guille', 'Indar', 'Raul'] },
     'push-state': { json: JSON.stringify({ logs: new Date(NOW - 60_000).toISOString(), chat: new Date(NOW - 60_000).toISOString() }) },
-  };
+    'push-subs': {},
+  });
   globalThis.fetch = async (url, init = {}) => {
     url = String(url);
+    const answered = fs.handle(url, init);
+    if (answered) return answered;
     if (init.method === 'POST') {
       const body = String(init.body);
       return json(body.includes('activityLogs') ? [{ document: { ...doc('activityLogs/l1', log), updateTime: new Date(NOW - 30_000).toISOString() } }] : []);
     }
     if (init.method === 'PATCH') return json({});
-    if (url.includes('/config?')) return json({ documents: Object.entries(config).map(([id, o]) => doc(`config/${id}`, o)) });
     if (url.includes('/events/e1')) return json(doc('events/e1', EVENT));
-    if (url.includes('/presence?')) return json({});
-    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' };
-    if (url.includes('/config/push-subs')) return json(doc('config/push-subs', {}));
     throw new Error(`unexpected ${url}`);
   };
   try {

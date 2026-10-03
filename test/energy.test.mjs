@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { createECDH, randomBytes } from 'node:crypto';
 import ece from 'http_ece';
 import { energyAt, run } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 import { categoryOf, wants } from '../prefs.mjs';
 
 const H = 3_600_000, MIN = 60_000;
@@ -76,6 +77,10 @@ function world({ goats, prefs, farmOpen = true, state = {} }) {
   const read = (hit, p) => JSON.parse(ece.decrypt(Buffer.from(hit.body), { version: 'aes128gcm', privateKey: w.devices[p].ecdh, authSecret: b64u(w.devices[p].auth) }).toString('utf8'));
   /** One round at `now`; resolves to the notices that went out: [{ to, title, body, url, tag }]. */
   w.round = async now => {
+    const fs = firestoreStand();
+    Object.assign(fs.config, { users: { list: PEOPLE }, roles: { admins: ['Alex'] }, preferences: { farmEnabled: true, farmOpen: w.farmOpen }, 'push-state': { json: w.state },
+      'push-subs': Object.fromEntries(Object.entries(w.devices).map(([p, d]) => [p, { d0: { endpoint: d.endpoint, keys: d.keys, at: 1 } }])) },
+      Object.fromEntries(Object.entries(w.goats).map(([id, g]) => [`goat-${id}`, g])), w.prefs === undefined ? {} : { 'push-prefs': w.prefs });
     const real = globalThis.fetch;
     const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
     const hits = [];
@@ -87,15 +92,9 @@ function world({ goats, prefs, farmOpen = true, state = {} }) {
         if (path === 'push-state') w.state = JSON.parse(init.body).fields.json.stringValue;
         return json({});
       }
+      const answered = fs.handle(url, init);
+      if (answered) return answered;
       if (init.method === 'POST') return json([]);
-      if (url.includes('/config/push-subs')) return json(doc('config/push-subs', Object.fromEntries(Object.entries(w.devices).map(([p, d]) => [p, { d0: { endpoint: d.endpoint, keys: d.keys, at: 1 } }]))));
-      if (url.includes('/config/push-prefs')) return w.prefs === undefined ? { ok: false, status: 404, json: async () => ({}), text: async () => '' } : json(doc('config/push-prefs', w.prefs));
-      if (url.includes('/config?')) {
-        const all = { users: { list: PEOPLE }, roles: { admins: ['Alex'] }, preferences: { farmEnabled: true, farmOpen: w.farmOpen }, 'push-state': { json: w.state },
-          ...Object.fromEntries(Object.entries(w.goats).map(([id, g]) => [`goat-${id}`, g])) };
-        return json({ documents: Object.entries(all).map(([id, o]) => doc(`config/${id}`, o)) });
-      }
-      if (url.includes('/presence?')) return json({});
       throw new Error(`unexpected ${url}`);
     };
     try { await run({ project: 'mi-gente-preprod', now, log: () => {}, ...KEYS }); } finally { globalThis.fetch = real; }

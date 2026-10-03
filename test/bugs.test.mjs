@@ -2,6 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bugSnippet, freshBugReports, run } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 
 const NOW = Date.UTC(2026, 9, 2, 12, 0, 0); // 14:00 in Madrid: not quiet hours
 const bugId = (ms, tail = 'abc123') => `bug-${ms}-${tail}`;
@@ -33,21 +34,16 @@ test('freshBugReports: only open reports of the last day, oldest first', () => {
 });
 
 // a stand-in for the app's Firestore (REST): config documents, nothing in the logs or the chat
-const int = n => ({ integerValue: String(n) });
-const str = s => ({ stringValue: s });
 function fakeFirestore(docs, writes) {
-  const toFields = o => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined).map(([k, v]) =>
-    [k, typeof v === 'number' ? int(v) : typeof v === 'boolean' ? { booleanValue: v } : Array.isArray(v) ? { arrayValue: { values: v.map(str) } } : str(v)]));
-  const full = (id, o) => ({ name: `projects/p/databases/(default)/documents/config/${id}`, fields: toFields(o) });
+  const fs = firestoreStand();
+  Object.assign(fs.config, docs, { 'push-subs': {} }); // nobody has set preferences (no push-prefs)
   const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
   return async (url, init = {}) => {
     url = String(url);
-    if (init.method === 'POST') return json([]);
+    const answered = fs.handle(url, init);
+    if (answered) return answered;
+    if (init.method === 'POST') return json([]); // the activity log and the chat: nothing new
     if (init.method === 'PATCH') { writes.push(JSON.parse(init.body)); return json({}); }
-    if (url.includes('/config?')) return json({ documents: Object.entries(docs).map(([id, o]) => full(id, o)) });
-    if (url.includes('/presence?')) return json({});
-    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
-    if (url.includes('/config/push-subs')) return json(full('push-subs', {}));
     throw new Error(`unexpected ${url}`);
   };
 }

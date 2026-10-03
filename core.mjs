@@ -33,15 +33,37 @@ const quote = s => /^[A-Za-z_][A-Za-z_0-9]*$/.test(s) ? s : '`' + s.replace(/[`\
 
 /** Only these fields come back (the Worker's free plan counts every millisecond spent reading what it doesn't use). */
 const maskQuery = (fields, sep) => fields.length ? sep + fields.map(f => `mask.fieldPaths=${encodeURIComponent(f)}`).join('&') : '';
-// what each round reads from config (one mask for the whole collection: a document keeps the fields it has of these)
-const CONFIG_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
-  'owner', 'soloTrip', 'needs', 'restedAt', 'asleep', 'personality', 'boxes', 'streak', 'status', 'toGoatId', 'fromGoatId', 'offeredAt',
-  // «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
-  'kind', 'by', 'text', 'at', 'resolved',
-  // «Probar avisos» (config/push-test): only whether it is done; the results are written, never read
-  'doneAt'];
+
+// What a round reads, and how. Firestore bills one read per document returned (and one for a query that finds nothing,
+// or a named document that isn't there), so the round never lists a collection: it asks for exactly what it uses.
+//   named documents, one batchGet: users, roles, preferences, push-state, push-test, farm-event (one mask for the lot)
+//   push-subs and push-prefs: their fields are people's names, which a mask can't list, so they go unmasked
+//   goats: the config documents with an `owner` (only a goat has one), when the farm is on
+//   gifts: the config documents with status == 'pending' (the round keeps only the farm-costume-gift-* ones)
+//   bug reports: the config documents with an `at` in the last day (the round keeps only the bug-* ones)
+//   presence: only the documents that have `missed`, because the app deletes the field once the pokes are seen
+// None of these queries needs a composite index: each filters on one field (an automatic single-field index).
+const NAMED_DOCS = ['users', 'roles', 'preferences', 'push-state', 'push-test', 'farm-event'];
+const NAMED_FIELDS = ['list', 'admins', 'farmEnabled', 'farmOpen', 'json', 'id', 'from', 'to', 'name', 'blurb',
+  // «Probar avisos» (config/push-test): who asked, when, and whether it is done; the results are written, never read
+  'by', 'text', 'at', 'doneAt'];
+const GOAT_FIELDS = ['owner', 'name', 'personality', 'needs', 'restedAt', 'asleep', 'boxes', 'soloTrip', 'streak'];
+const GIFT_FIELDS = ['status', 'toGoatId', 'fromGoatId', 'offeredAt'];
+// «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
+const BUG_FIELDS = ['kind', 'by', 'text', 'at', 'resolved'];
+
+// the structured query's filters
+const field = fieldPath => ({ fieldPath });
+const where = {
+  equal: (f, v) => ({ fieldFilter: { field: field(f), op: 'EQUAL', value: v } }),
+  after: (f, v) => ({ fieldFilter: { field: field(f), op: 'GREATER_THAN', value: v } }),
+  atLeast: (f, v) => ({ fieldFilter: { field: field(f), op: 'GREATER_THAN_OR_EQUAL', value: v } }),
+  notNull: f => ({ unaryFilter: { field: field(f), op: 'IS_NOT_NULL' } }),
+};
 
 function firestore(base, dry) {
+  // the documents' resource name, as batchGet wants it (the URL without its host and version)
+  const resource = base.replace(/^https?:\/\/[^/]+\/v1\//, '');
   return {
     async get(path, mask = []) {
       const r = await fetch(`${base}/${path}${maskQuery(mask, '?')}`);
@@ -49,17 +71,24 @@ function firestore(base, dry) {
       if (!r.ok) throw new Error(`GET ${path}: ${r.status} ${await r.text()}`);
       return docOf(await r.json());
     },
-    async list(collection, mask = []) {
-      const out = [];
-      let token = '';
-      do {
-        const r = await fetch(`${base}/${collection}?pageSize=300${token ? `&pageToken=${token}` : ''}${maskQuery(mask, '&')}`);
-        if (!r.ok) throw new Error(`list ${collection}: ${r.status}`);
-        const j = await r.json();
-        out.push(...(j.documents || []).map(docOf));
-        token = j.nextPageToken || '';
-      } while (token);
+    /**
+     * Several documents of any collection in one request (`paths` like 'config/users'), one mask for all of them.
+     * Resolves to { [id]: document }, with null for one that does not exist (which Firestore bills as a read too).
+     */
+    async batchGet(paths, mask = []) {
+      const out = Object.fromEntries(paths.map(p => [p.split('/').pop(), null]));
+      const r = await fetch(`${base}:batchGet`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+        documents: paths.map(p => `${resource}/${p}`), ...(mask.length ? { mask: { fieldPaths: mask } } : {}) }) });
+      if (!r.ok) throw new Error(`batchGet: ${r.status} ${await r.text()}`);
+      for (const x of await r.json()) if (x.found) out[x.found.name.split('/').pop()] = docOf(x.found);
       return out;
+    },
+    /** The documents of a collection that match `filter` (see `where`), with only the `select` fields. */
+    async query(collection, filter, select = []) {
+      const r = await fetch(`${base}:runQuery`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ structuredQuery: {
+        ...(select.length ? { select: { fields: select.map(field) } } : {}), from: [{ collectionId: collection }], where: filter } }) });
+      if (!r.ok) throw new Error(`query ${collection}: ${r.status} ${await r.text()}`);
+      return (await r.json()).filter(x => x.document).map(x => docOf(x.document));
     },
     /**
      * Documents of a collection whose `field` (a timestamp) is after `cursor`, oldest first. The cursor is Firestore's
@@ -249,9 +278,12 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
 
   // push-subs on its own: its fields are people's names, which a mask can't list
   // push-prefs too: who switched which categories off (see prefs.mjs)
-  const [config, presence, pushSubs, pushPrefs, appVersion] = await Promise.all([db.list('config', CONFIG_FIELDS), db.list('presence', ['missed']), db.get('config/push-subs'), db.get('config/push-prefs'),
+  const [byId, { 'push-subs': pushSubs, 'push-prefs': pushPrefs }, presence, bugDocs, appVersion] = await Promise.all([
+    db.batchGet(NAMED_DOCS.map(id => `config/${id}`), NAMED_FIELDS),
+    db.batchGet(['config/push-subs', 'config/push-prefs']),
+    db.query('presence', where.notNull('missed'), ['missed']),
+    db.query('config', where.after('at', { integerValue: String(NOW - BUG_FRESH) }), BUG_FIELDS),
     project === RELEASE_PROJECT ? fetchAppVersion(APP, NOW) : '']);
-  const byId = Object.fromEntries(config.map(d => [d._doc, d]));
   const friends = byId.users?.list || [];
   const admins = byId.roles?.admins || ['Alex'];
   const prefs = byId.preferences || {};
@@ -263,6 +295,13 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   if (first) state.logs = state.chat = new Date(NOW).toISOString(); state.sent ??= {}; state.low ??= {}; state.boxSeen ??= {}; state.missed ??= {}; state.queue ??= {};
 
   // «Probar avisos»: a request from an admin, to be sent to exactly the people it names
+  // the goats and the pending gifts, only when the farm is on (nothing else asks for them)
+  const [goatDocs, giftDocs] = prefs.farmEnabled
+    ? await Promise.all([db.query('config', where.atLeast('owner', { stringValue: '' }), GOAT_FIELDS), db.query('config', where.equal('status', { stringValue: 'pending' }), GIFT_FIELDS)])
+    : [[], []];
+  const goats = goatDocs.filter(d => d._doc.startsWith('goat-'));
+  const gifts = giftDocs.filter(d => d._doc.startsWith('farm-costume-gift-'));
+
   const test = pendingPushTest(byId['push-test'], admins, NOW);
   const testDevices = test ? test.to.reduce((n, p) => n + (friends.includes(p) ? Object.keys(subs[p] || {}).length : 0), 0) : 0;
 
@@ -324,21 +363,23 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     }
   }
 
-  // pokes that arrived while they were away (presence/<name>.missed = { from: count })
+  // pokes that arrived while they were away (presence/<name>.missed = { from: count }; only the documents that have any
+  // come back, and whoever had some and has none now (they came in and saw them) goes back to none, so the next one counts)
   for (const p of presence) {
     const missed = p.missed || {}, seen = state.missed[p._doc] || {};
     for (const [from, n] of Object.entries(missed)) if (n > (seen[from] || 0)) say(p._doc, `👉 ${from} te ha dado un toque`, 'Entra a ver qué quiere', '/', `poke-${from}`, 'poke');
     state.missed[p._doc] = missed;
   }
+  const withPokes = new Set(presence.map(p => p._doc));
+  for (const name of Object.keys(state.missed)) if (!withPokes.has(name)) state.missed[name] = {};
 
   // a new bug report: every admin but the one who sent it
-  for (const r of freshBugReports(config, NOW))
+  for (const r of freshBugReports(bugDocs, NOW))
     once(`bug:${r.id}`, () => admins.filter(a => a !== r.by).forEach(a => say(a, `🐞 Nuevo fallo de ${r.by}`, bugSnippet(r.text) || 'Mira el informe en Admin', '/?admin', `bug-${r.id}`, 'bug')));
 
   // the farm, for whoever can play it
   if (prefs.farmEnabled) {
     const plays = person => prefs.farmOpen === true || admins.includes(person);
-    const goats = config.filter(d => d._doc.startsWith('goat-'));
     const goatById = Object.fromEntries(goats.map(g => [g._doc.slice(5), g]));
     for (const goat of goats) {
       const owner = goat.owner, gid = goat._doc.slice(5);
@@ -367,7 +408,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       } else delete state.boxSeen[gid];
     }
     // gifts waiting to be accepted
-    for (const gift of config.filter(d => d._doc.startsWith('farm-costume-gift-') && d.status === 'pending')) {
+    for (const gift of gifts.filter(d => d.status === 'pending')) {
       const to = goatById[gift.toGoatId], from = goatById[gift.fromGoatId];
       if (!to || !plays(to.owner)) continue;
       once(`gift:${gift._doc}:${gift.offeredAt}`, () => say(to.owner, `🎁 ${from?.owner || 'Alguien'} te ha mandado un regalo`, `Para ${to.name}: ábrelo en su parcela`, `/?cabrita=${encodeURIComponent(gift.toGoatId)}`, `gift-${gift.toGoatId}`, 'farm:gift'));
@@ -385,7 +426,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   // a streak at stake: from 20:00, a run of three days or more that today's care hasn't counted yet
   if (prefs.farmEnabled && madridHour(NOW) >= 20) {
     const today = madridDay(NOW), yesterday = madridDay(NOW - 24 * HOUR);
-    for (const goat of config.filter(d => d._doc.startsWith('goat-'))) {
+    for (const goat of goats) {
       const s = goat.streak;
       if (!s || s.count < 3 || s.day !== yesterday) continue;
       once(`streak:${goat._doc}:${today}`, () => say(goat.owner, `☀️ Racha de ${s.count} días`, `Cuida hoy a ${goat.name} para no perderla`, `/?cabrita=${encodeURIComponent(goat._doc.slice(5))}`, 'streak', 'farm:streak'));

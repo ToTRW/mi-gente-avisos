@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createECDH, randomBytes } from 'node:crypto';
 import ece from 'http_ece';
 import { pendingPushTest, run } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 
 const b64u = b => Buffer.from(b).toString('base64url');
 const NOW = Date.UTC(2026, 9, 2, 1, 0, 0); // 03:00 in Madrid: quiet hours
@@ -36,12 +37,15 @@ async function round({ docs = {}, subs = {}, pushStatus = () => 201, updateTime 
   const hits = [], bodies = {}, patches = [], raw = [], lines = [];
   const real = globalThis.fetch;
   const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
-  const config = {
+  const fs = firestoreStand();
+  Object.assign(fs.config, {
     users: { list: ['Alex', 'Vane', 'Guille', 'Indar'] },
     roles: { admins: ['Alex'] },
     'push-state': { json: JSON.stringify({ logs: new Date(NOW - 60_000).toISOString(), chat: new Date(NOW - 60_000).toISOString() }) },
     ...docs,
-  };
+    'push-subs': Object.fromEntries(Object.entries(subs).map(([p, ds]) => [p, Object.fromEntries(ds.map((d, i) => [`d${i}`, sub(d)]))])),
+  });
+  if (updateTime) fs.updateTimes['push-test'] = updateTime;
   globalThis.fetch = async (url, init = {}) => {
     url = String(url);
     if (url.startsWith('https://push.test/')) {
@@ -55,11 +59,9 @@ async function round({ docs = {}, subs = {}, pushStatus = () => 201, updateTime 
       raw.push(init.body);
       return json({});
     }
+    const answered = fs.handle(url, init);
+    if (answered) return answered;
     if (init.method === 'POST') return json([]);
-    if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
-    if (url.includes('/config/push-subs')) return json(doc('push-subs', Object.fromEntries(Object.entries(subs).map(([p, ds]) => [p, Object.fromEntries(ds.map((d, i) => [`d${i}`, sub(d)]))]))));
-    if (url.includes('/config?')) return json({ documents: Object.entries(config).map(([id, o]) => doc(id, o, id === 'push-test' ? updateTime : undefined)) });
-    if (url.includes('/presence?')) return json({});
     throw new Error(`unexpected ${url}`);
   };
   try { await run({ project: 'mi-gente-preprod', now: NOW, log: l => lines.push(l), ...KEYS }); } finally { globalThis.fetch = real; }

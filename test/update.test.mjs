@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import { createECDH, randomBytes } from 'node:crypto';
 import ece from 'http_ece';
 import { run, fetchAppVersion } from '../core.mjs';
+import { firestoreStand } from './fakefs.mjs';
 
 const b64u = b => Buffer.from(b).toString('base64url');
 const DAY = Date.UTC(2026, 9, 3, 10, 0, 0);    // 12:00 in Madrid
@@ -33,6 +34,9 @@ function world({ subs = {}, version = '1.0.0', admins = ['Alex'] } = {}) {
   const w = { site: { version }, state: JSON.stringify({ logs: new Date(DAY - 60_000).toISOString(), chat: new Date(DAY - 60_000).toISOString() }), hits: [], bodies: {}, versionUrls: [], patches: [], lines: [] };
   const people = Object.keys(subs);
   w.round = async (now, project = 'mi-gente-quedadas') => {
+    const fs = firestoreStand();
+    Object.assign(fs.config, { users: { list: [...people, 'SinAvisos'] }, roles: { admins }, 'push-state': { json: w.state },
+      'push-subs': Object.fromEntries(Object.entries(subs).map(([p, ds]) => [p, Object.fromEntries(ds.map((d, i) => [`d${i}`, { endpoint: d.endpoint, keys: d.keys, at: 1 }]))])) });
     const real = globalThis.fetch;
     const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
     globalThis.fetch = async (url, init = {}) => {
@@ -50,11 +54,9 @@ function world({ subs = {}, version = '1.0.0', admins = ['Alex'] } = {}) {
         w.patches.push(path);
         return json({});
       }
+      const answered = fs.handle(url, init);
+      if (answered) return answered;
       if (init.method === 'POST') return json([]);
-      if (url.includes('/config/push-prefs')) return { ok: false, status: 404, json: async () => ({}), text: async () => '' }; // nobody has set preferences
-      if (url.includes('/config/push-subs')) return json(doc('push-subs', Object.fromEntries(Object.entries(subs).map(([p, ds]) => [p, Object.fromEntries(ds.map((d, i) => [`d${i}`, { endpoint: d.endpoint, keys: d.keys, at: 1 }]))]))));
-      if (url.includes('/config?')) return json({ documents: Object.entries({ users: { list: [...people, 'SinAvisos'] }, roles: { admins }, 'push-state': { json: w.state } }).map(([id, o]) => doc(id, o)) });
-      if (url.includes('/presence?')) return json({});
       throw new Error(`unexpected ${url}`);
     };
     w.hits.length = 0;
