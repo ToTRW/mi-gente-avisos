@@ -8,7 +8,7 @@ de comandos (`send.mjs`).
 
 - Qué se avisa: plan nuevo, hora fijada, plan aplazado o con fechas cambiadas, recordatorio de respuesta, chat,
   toques; y de la granja, regalo recibido, vuelta de excursión, hambre o tristeza, energía a tope otra vez, caja sin abrir, racha en peligro
-  (a partir de las 20:00) y eventos (cuando empiezan y su último día). Y, solo en producción, cuando la app se
+  (a partir de las 20:00) y eventos (cuando empiezan y su último día: los de `EVENT_SCHEDULE` en `core.mjs`, que copia el calendario de la app, y `config/farm-event` solo como anulación a mano, que manda mientras está activa). Y, solo en producción, cuando la app se
   actualiza: cada ronda lee `/version.json` de la web, y si la versión cambia respecto a la guardada
   (`appVersion` en `config/push-state`) todos los que tienen avisos reciben uno, «Mi Gente se ha actualizado», que abre
   `/?novedades`. La primera vez solo guarda la versión; si falla la lectura no pasa nada.

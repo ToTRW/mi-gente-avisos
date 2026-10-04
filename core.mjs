@@ -138,6 +138,34 @@ const madrid = t => new Date(t + madridOffset(t) * 3_600_000); // read with the 
 export const madridDay = t => madrid(t).toISOString().slice(0, 10);
 export const madridHour = t => madrid(t).getUTCHours();
 
+// ---------- Farm events (mirrors src/lib/goats/events.ts in the app) ----------
+// The app runs events on a schedule in code (EVENT_SCHEDULE: first and last day, in Madrid, from 12:00 on the first to 12:00
+// the day after the last, the drop hour); config/farm-event is only a manual override. These are those windows as UTC
+// moments (castañas 12 Oct 12:00 CEST to 19 Oct 12:00 CEST; Halloween 22 Oct 12:00 CEST to 3 Nov 12:00 CET, after the clocks
+// change on 25 Oct), with the names and blurbs of FARM_EVENTS. A change to either list in the app is a change here too.
+export const FARM_EVENTS = {
+  castanas: { name: 'Castañas', blurb: 'Caen castañas por la granja: recógelas, cada una da una hoja.' },
+  halloween: { name: 'Halloween', blurb: 'Calabazas en la granja, más cosas de miedo en los cofres y concurso de disfraces.' },
+};
+export const EVENT_SCHEDULE = [
+  { id: 'castanas', from: Date.parse('2026-10-12T10:00:00Z'), to: Date.parse('2026-10-19T10:00:00Z') },
+  { id: 'halloween', from: Date.parse('2026-10-22T10:00:00Z'), to: Date.parse('2026-11-03T11:00:00Z') },
+];
+
+/**
+ * The event that is on at `now`, as { id, from, to, name, blurb, source: 'doc' | 'schedule' }, or null. Same rule as the
+ * app's farmEventAt: the override doc (config/farm-event) wins while from <= now < to, otherwise the schedule applies.
+ * A doc started inside its own scheduled window keeps the scheduled `from` (the app does too), so the «Empieza» key is the same one.
+ */
+export function farmEventAt(doc, now) {
+  if (doc?.id && typeof doc.from === 'number' && typeof doc.to === 'number' && doc.from <= now && now < doc.to) {
+    const def = FARM_EVENTS[doc.id] || {}, sched = EVENT_SCHEDULE.find(s => s.id === doc.id && s.from <= doc.from && doc.from < s.to);
+    return { id: doc.id, from: sched ? sched.from : doc.from, to: doc.to, name: doc.name || def.name || 'Evento en la granja', blurb: doc.blurb || def.blurb || 'Pásate por la granja.', source: 'doc' };
+  }
+  const s = EVENT_SCHEDULE.find(e => e.from <= now && now < e.to);
+  return s ? { ...s, ...FARM_EVENTS[s.id], source: 'schedule' } : null;
+}
+
 // ---------- The goat farm (mirrors src/lib/goats/model.ts in the app) ----------
 
 const clamp = n => Math.max(0, Math.min(100, n));
@@ -415,12 +443,16 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     }
   }
 
-  // a farm event: when it starts, and on its last day (everyone who plays)
-  const ev = byId['farm-event'];
-  if (prefs.farmEnabled && ev?.id && ev.from <= NOW && NOW < ev.to) {
-    const name = ev.name || 'Evento en la granja', players = friends.filter(p => prefs.farmOpen === true || admins.includes(p));
-    once(`event:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `🎉 Empieza: ${name}`, ev.blurb || 'Pásate por la granja.', '/?granja', 'event', 'farm:event')));
-    if (ev.to - NOW < 24 * HOUR) once(`event-last:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `⏳ Último día: ${name}`, ev.blurb || 'Mañana se acaba.', '/?granja', 'event', 'farm:event')));
+  // a farm event: when it starts, and on its last day (everyone who plays). Which one is on is farmEventAt's answer
+  // (the app's rule): config/farm-event wins while it is on, otherwise the schedule. Already read with the named documents.
+  const ev = farmEventAt(byId['farm-event'], NOW);
+  if (prefs.farmEnabled && ev) {
+    const players = friends.filter(p => prefs.farmOpen === true || admins.includes(p));
+    // a start notice already sent for this event (whatever its `from`: a doc that ran before the schedule did) is not said again by the schedule
+    const toldBefore = Object.keys(state.sent).some(k => k.startsWith(`event:${ev.id}:`));
+    if (ev.source === 'doc' || !toldBefore)
+      once(`event:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `🎉 Empieza: ${ev.name}`, ev.blurb, '/?granja', 'event', 'farm:event')));
+    if (ev.to - NOW < 24 * HOUR) once(`event-last:${ev.id}:${ev.from}`, () => players.forEach(p => say(p, `⏳ Último día: ${ev.name}`, ev.blurb || 'Mañana se acaba.', '/?granja', 'event', 'farm:event')));
   }
 
   // a streak at stake: from 20:00, a run of three days or more that today's care hasn't counted yet
