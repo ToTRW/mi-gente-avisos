@@ -6,6 +6,9 @@
 // Plain fetch and WebCrypto only, so the same run() works in Node (send.mjs) and in the Cloudflare Worker (worker.mjs).
 import { sendPush } from './webpush.mjs';
 import { wants } from './prefs.mjs';
+import { madridDay, madridHour, madridOffset } from './time.mjs';
+import { confirmedParticipants, duePlanReminders, reminderStillValid } from './reminders.mjs';
+export { madridDay, madridHour, madridOffset } from './time.mjs';
 
 const APPS = { 'mi-gente-quedadas': 'https://mi-gente-quedadas.web.app', 'mi-gente-preprod': 'https://mi-gente-preprod.web.app' };
 const HOUR = 3_600_000;
@@ -51,6 +54,7 @@ const GOAT_FIELDS = ['owner', 'name', 'personality', 'needs', 'restedAt', 'aslee
 const GIFT_FIELDS = ['status', 'toGoatId', 'fromGoatId', 'offeredAt'];
 // «Reportar un fallo» (config/bug-*): never `thumb`, the little picture
 const BUG_FIELDS = ['kind', 'by', 'text', 'at', 'resolved'];
+const PLAN_FIELDS = ['name', 'series', 'session', 'locked', 'archived', 'participants', 'availability', 'rsvpStatus', 'startDate', 'endDate', 'startHour', 'endHour'];
 
 // the structured query's filters
 const field = fieldPath => ({ fieldPath });
@@ -129,14 +133,7 @@ function firestore(base, dry) {
 
 // By hand rather than with Intl (time zones were most of the Worker's CPU): Madrid is UTC+1, and UTC+2 from the last
 // Sunday of March to the last Sunday of October, changing at 01:00 UTC both times (the EU rule).
-const lastSunday = (year, month) => { const end = Date.UTC(year, month + 1, 0); return end - new Date(end).getUTCDay() * 86_400_000; };
-export function madridOffset(t) {
-  const year = new Date(t).getUTCFullYear();
-  return t >= lastSunday(year, 2) + 3_600_000 && t < lastSunday(year, 9) + 3_600_000 ? 2 : 1;
-}
-const madrid = t => new Date(t + madridOffset(t) * 3_600_000); // read with the getUTC* methods
-export const madridDay = t => madrid(t).toISOString().slice(0, 10);
-export const madridHour = t => madrid(t).getUTCHours();
+// Calendar helpers live in time.mjs so plan reminders use the same Madrid/DST clock.
 
 // ---------- Farm events (mirrors src/lib/goats/events.ts in the app) ----------
 // The app runs events on a schedule in code (EVENT_SCHEDULE: first and last day, in Madrid, from 12:00 on the first to 12:00
@@ -338,6 +335,26 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   const say = (to, title, body, url = '/', tag, kind) => { if (to && friends.includes(to)) out.push({ to, title, body, url, tag, kind }); };
   const once = (key, fn) => { if (state.sent[key]) return; state.sent[key] = NOW; fn(); };
 
+  // Only fixed plans today/tomorrow, by an indexed equality query, never the whole events collection.
+  // This route is independent of the Discord reminder job and its sent markers.
+  const today = madridDay(NOW), tomorrow = new Date(Date.parse(`${today}T12:00:00Z`) + 24 * HOUR).toISOString().slice(0, 10);
+  const plans = (await Promise.all([today, tomorrow].map(day =>
+    db.query('events', where.equal('locked.date', { stringValue: day }), PLAN_FIELDS)))).flat();
+  const reminderEvents = Object.fromEntries(plans.map(ev => [ev._doc, ev]));
+  for (const ev of plans) {
+    for (const r of duePlanReminders(ev, NOW)) {
+      for (const to of confirmedParticipants(ev, friends)) {
+        once(`plan-reminder:${ev._doc}:${r.startAt}:${ev.locked.endHour}:${r.key}:${to}`, () => {
+          const name = ev.name || 'un plan';
+          const pad = h => String(h).padStart(2, '0');
+          out.push({ to, title: `${r.label}: ${name}`, body: `${ev.locked.date} · ${pad(ev.locked.startHour)}:00–${pad(ev.locked.endHour)}:00`,
+            url: `/?evento=${encodeURIComponent(ev._doc)}`, tag: `reminder-${ev._doc}-${r.key}`, kind: 'plan:reminder',
+            eventId: ev._doc, reminderKey: r.key, startAt: r.startAt, endHour: ev.locked.endHour, expiresAt: r.expiresAt });
+        });
+      }
+    }
+  }
+
   // a new version of the app with something new in it: everyone with avisos on hears it once (a newer notice replaces an older one, also in the morning queue).
   // The first time there is no version on record: it is only written down.
   if (appVersion) {
@@ -477,7 +494,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   // choice of the moment it goes out is the one that counts. The test notices never come through here.
   let muted = 0;
   for (const k of Object.keys(state.queue)) {
-    const wanted = state.queue[k].filter(o => wants(prefsOf, k, o.kind));
+    const wanted = state.queue[k].filter(o => wants(prefsOf, k, o.kind)
+      && (o.kind !== 'plan:reminder' || reminderStillValid(o, reminderEvents[o.eventId], friends, NOW)));
     muted += state.queue[k].length - wanted.length;
     state.queue[k] = wanted.slice(-30);
   }
@@ -490,7 +508,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       if (!items.length) continue;
       // several for one person become one
       const batch = items.length > 3
-        ? [{ to: person, title: `Mi Gente: ${items.length} novedades`, body: items.slice(-3).map(i => i.title.replace(/^\S+\s/, '')).join(' · '), url: '/', tag: 'digest' }]
+        ? [{ to: person, title: `Mi Gente: ${items.length} novedades`, body: items.slice(-3).map(i => i.title.replace(/^\S+\s/, '')).join(' · '), url: '/', tag: 'digest',
+          ...(items.some(i => Number.isFinite(i.expiresAt)) ? { expiresAt: Math.min(...items.filter(i => Number.isFinite(i.expiresAt)).map(i => i.expiresAt)) } : {}) }]
         : items;
       const cost = batch.length * Object.keys(subs[person] || {}).length;
       if (sends.length && cost > budget) continue;
@@ -533,7 +552,8 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
       if (dry) { log(`[dry] ${s.to} (${id}): ${s.title} | ${s.body}`); continue; }
       try {
         const r = await sendPush({ endpoint: sub.endpoint, keys: sub.keys }, JSON.stringify({ title: s.title, body: s.body, url: s.url, tag: s.tag }),
-          { subject: APP, publicKey: vapidPublic, privateKey: vapidPrivate });
+          { subject: APP, publicKey: vapidPublic, privateKey: vapidPrivate,
+            ...(Number.isFinite(s.expiresAt) ? { ttl: Math.max(0, Math.floor((s.expiresAt - NOW) / 1000)) } : {}) });
         if (r.status === 404 || r.status === 410) gone.push([s.to, id]);
         else if (r.status >= 200 && r.status < 300) delivered++;
         else log(`push to ${s.to} (${id}) failed: ${r.status} ${r.text}`);

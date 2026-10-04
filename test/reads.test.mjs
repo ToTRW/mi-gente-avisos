@@ -80,12 +80,12 @@ test('a typical round: 8 goats, 2 fresh bug reports, 1 gift, 60 other config doc
   ].sort());
 
   // what it read: 6 named documents, push-subs, push-prefs (absent: still a read), 1 presence document, 2 bug reports, 8 goats, 1 gift
-  assert.equal(fs.reads, 6 + 2 + 1 + 2 + 8 + 1);
+  assert.equal(fs.reads, 6 + 2 + 1 + 2 + 8 + 1 + 2);
   const total = fs.reads + fs.logsAndChat; // and the activity log and the chat, one read each when there is nothing new
   // before: every config document (the 60, the 8 goats, 2 bug reports, 1 gift, and users, roles, preferences, push-state, farm, push-subs), every presence
   // document, push-subs and push-prefs once more, and the log and the chat
   const before = Object.keys(config).length + Object.keys(presence).length + 2 + 2;
-  assert.ok(total <= 24, `${total} reads a round`);
+  assert.ok(total <= 26, `${total} reads a round`);
   assert.ok(total * 3 < before, `${total} is not far below ${before}`);
   console.log(`reads per round: ${total} now, ${before} before`);
 });
@@ -93,7 +93,7 @@ test('a typical round: 8 goats, 2 fresh bug reports, 1 gift, 60 other config doc
 test('with the farm switched off, the goats and the gifts are not read at all', async () => {
   const fs = stand(farm({ preferences: { farmEnabled: false } }));
   await round(fs, NOON);
-  assert.equal(fs.reads, 6 + 2 + 1 + 1); // the named ones, push-subs and push-prefs, the presence and bug queries finding nothing
+  assert.equal(fs.reads, 6 + 2 + 1 + 1 + 2); // named docs, push prefs, empty presence/bugs and today's/tomorrow's plans
 });
 
 // ---------- what comes out of the documents it does read ----------
@@ -114,7 +114,7 @@ test('gifts: only a pending one to a goat that plays is told, once; an accepted 
   const gift = (status, over = {}) => ({ schemaVersion: 1, fromGoatId: 'id-Vane', toGoatId: 'id-Guille', status, offeredAt: NOON - 60_000, itemId: 'hat', price: 0, ...over });
   const fs = stand(farm({ 'farm-costume-gift-id-Vane-id-Guille': gift('pending'), 'farm-costume-gift-id-Vane-id-Indar': gift('accepted', { toGoatId: 'id-Indar' }) }));
   assert.deepEqual(await round(fs, NOON), ['Guille: 🎁 Vane te ha mandado un regalo']);
-  assert.equal(fs.reads, 6 + 2 + 1 + 1 + 8 + 1, 'one gift read, not two');
+  assert.equal(fs.reads, 6 + 2 + 1 + 1 + 8 + 1 + 2, 'one gift read, not two');
   assert.deepEqual(await round(fs, NOON + 5 * 60_000), [], 'told once');
 });
 

@@ -18,6 +18,7 @@ export const KIND_CATEGORY = {
   'plan:dates': 'planes',           // «ha cambiado las fechas»
   'plan:nudge': 'recordatorios',    // «te recuerda un plan»
   'plan:nudge-maybe': 'recordatorios', // «pide que confirmes»
+  'plan:reminder': 'recordatorios',  // mañana, en dos horas y al empezar, solo confirmados
   'late': 'tarde',                  // «llega tarde»
   'chat': 'chat',
   'poke': 'toques',                 // zumbidos that arrived while they were away

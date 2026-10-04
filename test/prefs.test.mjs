@@ -202,6 +202,6 @@ test('every kind the round sends is in the table (all of them, queued at night)'
   assert.ok(queued.length > 10, `got ${queued.length}`);
   assert.ok(queued.every(o => categoryOf(o.kind)), `a notice without a category: ${JSON.stringify(queued.find(o => !categoryOf(o.kind)))}`);
   // the update notice only exists for the live project (test/update.test.mjs), and no race notice is sent yet
-  const missing = Object.keys(KIND_CATEGORY).filter(k => !kinds.has(k) && k !== 'race' && k !== 'app-update');
+  const missing = Object.keys(KIND_CATEGORY).filter(k => !kinds.has(k) && !['race', 'app-update', 'plan:reminder'].includes(k));
   assert.deepEqual(missing, [], 'every kind was triggered');
 });

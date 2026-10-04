@@ -13,6 +13,13 @@ de comandos (`send.mjs`).
   (`appVersion` en `config/push-state`) todos los que tienen avisos reciben uno, «Mi Gente se ha actualizado», que abre
   `/?novedades`. La primera vez solo guarda la versión; si falla la lectura no pasa nada.
   Y a los admins, un informe de «Reportar un fallo» nuevo (el de las últimas 24 horas que sigue abierto; no a quien lo mandó).
+- **Planes fijados: mañana, en dos horas y al empezar.** Solo para participantes confirmados a la hora fijada,
+  como el contador del plan: «Voy» sin horas o con toda la franja marcada, y selecciones del sistema antiguo que
+  cubran esa franja. Nunca «Quizá», pendientes, «No puedo», personas no invitadas ni planes sin fijar o archivados.
+  Siguen el interruptor «Recordatorios de planes». Son independientes de Discord, incluido `discordOff` y
+  `discordRemindersSent`: no cambian ningún aviso ni marcador de Discord. Se deduplican por plan, franja,
+  tipo y persona en `config/push-state`; una cola se revalida antes de enviar y caduca (6 h / 45 min / 15 min).
+  El TTL del servicio push también termina al caducar, para no entregar «Empieza ahora» horas después.
 - Nada entre las 23:00 y las 9:00 (hora de Madrid): se guardan para la mañana, y si son muchos llegan en uno.
 - Lo ya avisado se guarda en `config/push-state`, así que no se repite nada.
 - Las claves: `VAPID_PUBLIC` está en `wrangler.toml` (y en la app); `VAPID_PRIVATE` es un secreto del Worker
@@ -33,7 +40,8 @@ solo lo que usa. Seis documentos de `config` con un `batchGet` (`users`, `roles`
 índice compuesto) para las cabritas (`owner` presente, solo si la granja está encendida), los regalos
 (`status == 'pending'`), los informes de fallo (`at` de las últimas 24 horas) y los toques (`presence` con `missed`,
 que la app borra al verlos); y la consulta de siempre del registro de planes y del chat. Con 8 cabritas, 2 informes
-nuevos y un regalo son unas 22 lecturas por ronda, y eran unas 93 (todo `config`, que crece con cada informe, captura,
+nuevos y un regalo son unas 22 lecturas por ronda, más dos consultas indexadas por `locked.date` (hoy y mañana
+en Madrid) que leen solo los planes fijados de esos días. No se lista la colección entera de eventos. Eran unas 93 (todo `config`, que crece con cada informe, captura,
 carrera y pareja de la granja, más todo `presence`). `test/reads.test.mjs` cuenta las lecturas, y
 `test/fakefs.mjs` (el Firestore de las pruebas) falla si una ronda vuelve a listar una colección entera.
 

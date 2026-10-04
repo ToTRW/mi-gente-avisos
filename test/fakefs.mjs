@@ -28,17 +28,18 @@ const plain = v => 'stringValue' in v ? v.stringValue : 'integerValue' in v ? Nu
 const json = body => ({ ok: true, status: 200, json: async () => body, text: async () => JSON.stringify(body) });
 const notFound = { ok: false, status: 404, json: async () => ({}), text: async () => '' };
 const keep = (o, paths) => paths.length ? Object.fromEntries(Object.entries(o).filter(([k]) => paths.includes(k))) : o;
+const nested = (o, path) => path.split('.').reduce((v, key) => v?.[key], o);
 
 /** Whether the document `o` passes a structured query's filter (top-level fields only, which is all the Worker filters on). */
 function passes(o, filter) {
   if (!filter) return true;
   if (filter.compositeFilter) return filter.compositeFilter.filters.every(f => passes(o, f));
   if (filter.unaryFilter) {
-    const v = o[filter.unaryFilter.field.fieldPath];
+    const v = nested(o, filter.unaryFilter.field.fieldPath);
     if (filter.unaryFilter.op === 'IS_NOT_NULL') return v !== undefined && v !== null;
     throw new Error(`the stand-in does not know ${filter.unaryFilter.op}`);
   }
-  const { field, op, value } = filter.fieldFilter, have = o[field.fieldPath], want = plain(value);
+  const { field, op, value } = filter.fieldFilter, have = nested(o, field.fieldPath), want = plain(value);
   if (op === 'EQUAL') return have === want;
   if (typeof have !== typeof want || have === undefined) return false; // a range only matches the same kind of value
   if (op === 'GREATER_THAN') return have > want;
@@ -47,7 +48,7 @@ function passes(o, filter) {
 }
 
 export function firestoreStand() {
-  const fs = { config: {}, presence: {}, updateTimes: {}, reads: 0 };
+  const fs = { config: {}, presence: {}, events: {}, updateTimes: {}, reads: 0, queries: [] };
   const table = collection => fs[collection];
   const exists = (collection, id) => table(collection) && table(collection)[id] !== undefined;
   const full = (collection, id, paths) => docOf(`${collection}/${id}`, keep(table(collection)[id], paths), collection === 'config' ? fs.updateTimes[id] : undefined);
@@ -57,7 +58,7 @@ export function firestoreStand() {
     if (!/\/documents/.test(url)) return undefined;
     const path = url.split('/documents')[1] ?? '';
     // listing a whole collection is what the Worker no longer does
-    if (!init.method && /^\/(config|presence)(\?|$)/.test(path)) throw new Error(`a round listed the whole ${path.split(/[?]/)[0].slice(1)} collection`);
+    if (!init.method && /^\/(config|presence|events)(\?|$)/.test(path)) throw new Error(`a round listed the whole ${path.split(/[?]/)[0].slice(1)} collection`);
     if (path.startsWith(':batchGet')) {
       const body = JSON.parse(init.body), paths = body.mask?.fieldPaths || [];
       return json(body.documents.map(name => {
@@ -68,7 +69,8 @@ export function firestoreStand() {
     }
     if (path.startsWith(':runQuery')) {
       const q = JSON.parse(init.body).structuredQuery, collection = q.from[0].collectionId;
-      if (collection !== 'config' && collection !== 'presence') return undefined; // activityLogs and messages are the test's own
+      if (!['config', 'presence', 'events'].includes(collection)) return undefined; // activityLogs and messages are the test's own
+      fs.queries.push(q);
       const paths = (q.select?.fields || []).map(f => f.fieldPath);
       const ids = Object.keys(table(collection)).filter(id => table(collection)[id] !== undefined && passes(table(collection)[id], q.where)).sort();
       fs.reads += Math.max(1, ids.length); // a query that finds nothing is billed one read
