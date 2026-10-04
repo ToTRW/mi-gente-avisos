@@ -43,3 +43,18 @@ test('a late warning tells the others on the plan, not the one running late', as
   const lines = await round({ action: 'late:set', actor: 'Vane', eventId: 'e1', eventName: 'Cena', until: '21:30', reason: 'el metro', at: new Date(NOW - 30_000).toISOString() });
   assert.deepEqual(lines.sort(), ['(no devices) Alex: 🕘 Vane llega tarde', '(no devices) Guille: 🕘 Vane llega tarde']);
 });
+
+test('an entry with a name, or one from before «by» existed, reads as the actor warning for themselves', async () => {
+  const at = new Date(NOW - 30_000).toISOString();
+  const withName = await round({ action: 'late:set', actor: 'Vane', name: 'Vane', eventId: 'e1', eventName: 'Cena', until: '21:30', at });
+  assert.deepEqual(withName.sort(), ['(no devices) Alex: 🕘 Vane llega tarde', '(no devices) Guille: 🕘 Vane llega tarde']);
+  const sameBy = await round({ action: 'late:set', actor: 'Vane', name: 'Vane', by: 'Vane', eventId: 'e1', eventName: 'Cena', until: '21:30', at });
+  assert.deepEqual(sameBy.sort(), withName.sort());
+});
+
+test('an admin or the organiser warning for a friend: the push names the friend, says who warned, and the friend hears it too', async () => {
+  const at = new Date(NOW - 30_000).toISOString();
+  const lines = await round({ action: 'late:set', actor: 'Alex', name: 'Vane', by: 'Alex', eventId: 'e1', eventName: 'Cena', until: '21:30', reason: 'el metro', at });
+  // not Alex (he set it), but Vane herself, who did not
+  assert.deepEqual(lines.sort(), ['(no devices) Guille: 🕘 Vane llega tarde (avisa Alex)', '(no devices) Vane: 🕘 Vane llega tarde (avisa Alex)']);
+});

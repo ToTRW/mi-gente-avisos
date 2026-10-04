@@ -369,7 +369,7 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
   }
 
   // plans: from the activity log
-  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names', 'until', 'reason']);
+  const logs = await db.since('activityLogs', 'at', state.logs, ['action', 'actor', 'eventId', 'eventName', 'range', 'datesChanged', 'names', 'until', 'reason', 'name', 'by']);
   const events = {};
   const eventOf = async id => id ? (events[id] ??= await db.get(`events/${id}`, ['participants', 'name', 'availability', 'rsvpStatus']).catch(() => null)) : null;
   // someone who answered «no» is still on the list, but the plan isn't theirs any more (the app's isMyPlan says the same)
@@ -392,7 +392,14 @@ export async function run({ project = 'mi-gente-quedadas', vapidPublic = '', vap
     if (entry.action === 'event:edit' && entry.datesChanged) people.forEach(p => say(p, `✏️ ${who} ha cambiado las fechas`, name, url, `plan-${entry.eventId}`, 'plan:dates'));
     if (entry.action === 'event:nudge') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `📢 ${who} te recuerda un plan`, `Falta tu respuesta: ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge'));
     if (entry.action === 'event:nudge-maybe') (entry.names || []).filter(p => p !== who).forEach(p => say(p, `❔ ${who} pide que confirmes`, `¿Vas o no? ${name}`, url, `plan-${entry.eventId}`, 'plan:nudge-maybe'));
-    if (entry.action === 'late:set') going.forEach(p => say(p, `🕘 ${who} llega tarde`, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${who}`, 'late'));
+    if (entry.action === 'late:set') {
+      // `actor` is who pressed the button, `name` who is running late: they differ when an admin or the organiser warned for
+      // a friend (older entries have no `name`/`by`, so they read as the actor warning for themselves). Everyone going but the
+      // one who set it hears it, the late person included.
+      const late = entry.name || who, setter = entry.by || who;
+      const title = setter === late ? `🕘 ${late} llega tarde` : `🕘 ${late} llega tarde (avisa ${setter})`;
+      going.forEach(p => say(p, title, `A las ${entry.until}${entry.reason ? ` · ${entry.reason}` : ''}: ${name}`, url, `late-${entry.eventId}-${late}`, 'late'));
+    }
   }
 
   // the chat: one notification per person for however many messages came in
